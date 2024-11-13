@@ -1,14 +1,16 @@
 use super::{
-    base::Provider, configs::ProviderConfig, databricks::DatabricksProvider, openai::OpenAiProvider,
+    base::Provider, configs::ProviderConfig, databricks::DatabricksProvider, ollama::OllamaProvider,
+    openai::OpenAiProvider,
 };
 use anyhow::Error;
 
 pub enum ProviderType {
     OpenAi,
     Databricks,
+    Ollama,
 }
 
-pub fn get_provider(
+pub async fn get_provider(
     provider_type: ProviderType,
     config: ProviderConfig,
 ) -> Result<Box<dyn Provider + Send + Sync>, Error> {
@@ -18,6 +20,9 @@ pub fn get_provider(
         }
         (ProviderType::Databricks, ProviderConfig::Databricks(databricks_config)) => {
             Ok(Box::new(DatabricksProvider::new(databricks_config)?))
+        }
+        (ProviderType::Ollama, ProviderConfig::Ollama(ollama_config)) => {
+            Ok(Box::new(OllamaProvider::new(ollama_config).await?))
         }
         _ => Err(Error::msg("Provider type and config mismatch")),
     }

@@ -49,3 +49,12 @@ export DATABRICKS_TOKEN=...
 
 cargo run --bin goose -- --provider databricks --model claude-3-5-sonnet-2
 ```
+
+#### Ollama provider:
+```
+# Optional: Configure custom host (default: http://localhost:11434 since this is where ollama starts by default)
+export OLLAMA_HOST=http://localhost:11434
+
+# First run: ollama pull qwen2.5
+cargo run --bin goose -- --provider ollama --model qwen2.5
+```

@@ -9,15 +9,15 @@ use goose::providers::factory::ProviderType;
 
 use goose::agent::Agent;
 use goose::developer::DeveloperSystem;
-use goose::providers::configs::OpenAiProviderConfig;
+use goose::providers::configs::{OllamaProviderConfig, OpenAiProviderConfig};
 use goose::providers::configs::{DatabricksProviderConfig, ProviderConfig};
 use goose::providers::types::message::Message;
-use goose::providers::factory;
+use goose::providers::{factory, ollama};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Provider option (openai or databricks)
+    /// Provider option (openai or databricks or ollama)
     #[arg(short, long, default_value = "open-ai")]
     #[arg(value_enum)]
     provider: CliProviderVariant,
@@ -43,6 +43,7 @@ struct Cli {
 enum CliProviderVariant {
     OpenAi,
     Databricks,
+    Ollama
 }
 
 #[tokio::main]
@@ -52,6 +53,7 @@ async fn main() -> Result<()> {
     let provider_type = match cli.provider {
         CliProviderVariant::OpenAi => ProviderType::OpenAi,
         CliProviderVariant::Databricks => ProviderType::Databricks,
+        CliProviderVariant::Ollama => ProviderType::Ollama,
     };
 
     println!(
@@ -61,7 +63,7 @@ async fn main() -> Result<()> {
     println!("\n");
 
     let system = Box::new(DeveloperSystem::new());
-    let provider = factory::get_provider(provider_type, create_provider_config(&cli)).unwrap();
+    let provider = factory::get_provider(provider_type, create_provider_config(&cli)).await.unwrap();
     let mut agent = Agent::new(provider, cli.model.clone());
     agent.add_system(system);
     println!("Connected the developer system");
@@ -125,5 +127,12 @@ fn create_provider_config(cli: &Cli) -> ProviderConfig {
                 std::env::var("DATABRICKS_TOKEN").expect("DATABRICKS_TOKEN must be set")
             }),
         }),
+        CliProviderVariant::Ollama => ProviderConfig::Ollama(
+            OllamaProviderConfig {
+                host: std::env::var("OLLAMA_HOST")
+                    .unwrap_or_else(|_| String::from(ollama::OLLAMA_HOST))
+            }
+
+        )
     }
 }

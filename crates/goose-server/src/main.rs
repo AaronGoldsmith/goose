@@ -176,6 +176,7 @@ async fn chat_handler(
         ProviderType::OpenAi,
         ProviderConfig::OpenAi(state.provider_config),
     )
+    .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut agent = Agent::new(provider, state.model);
     agent.add_system(system);
