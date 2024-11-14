@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[non_exhaustive]
@@ -18,6 +18,7 @@ pub enum AgentError {
 
     #[error("Invalid tool name format: {0}")]
     InvalidToolName(String),
+
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;

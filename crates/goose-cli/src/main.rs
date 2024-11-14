@@ -6,14 +6,15 @@ use clap::{Parser, Subcommand};
 use cliclack::{input, spinner};
 use console::style;
 use futures::StreamExt;
-use goose::providers::factory::ProviderType;
 
+use goose::providers::factory::ProviderType;
 use goose::agent::Agent;
 use goose::developer::DeveloperSystem;
 use goose::providers::configs::{OllamaProviderConfig, OpenAiProviderConfig};
 use goose::providers::configs::{DatabricksProviderConfig, ProviderConfig};
 use goose::providers::{factory, ollama};
 use goose::providers::types::message::Message;
+
 use commands::configure::{handle_configure, ConfigOptions};
 use commands::version::{print_version};
 

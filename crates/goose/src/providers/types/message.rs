@@ -50,7 +50,9 @@ impl Message {
             }
             Role::Assistant => {
                 if !self.has_text() && !self.has_tool_request() {
-                    return Err(anyhow!("Assistant message must include a Text or ToolRequest"));
+                    return Err(anyhow!(
+                        "Assistant message must include a Text or ToolRequest"
+                    ));
                 }
                 if self.has_tool_response() {
                     return Err(anyhow!("Assistant message does not support ToolResponse"));
@@ -115,7 +117,10 @@ impl Message {
         Self::new(Role::Assistant, vec![Content::Text(Text::new(text))])
     }
 
-    pub fn assistant_with_tool_calls(text: Option<String>, tool_calls: Vec<ToolCall>) -> Result<Self> {
+    pub fn assistant_with_tool_calls(
+        text: Option<String>,
+        tool_calls: Vec<ToolCall>,
+    ) -> Result<Self> {
         let mut content = Vec::new();
         if let Some(text) = text {
             content.push(Content::Text(Text::new(text)));
@@ -209,7 +214,10 @@ mod tests {
         // Invalid message: assistant with tool_response
         let response = Message::new(
             Role::Assistant,
-            vec![Content::text(""), Content::tool_response("1", json!("result"))],
+            vec![
+                Content::text(""),
+                Content::tool_response("1", json!("result")),
+            ],
         );
         assert!(response.is_err());
         Ok(())
@@ -237,7 +245,10 @@ mod tests {
         let deserialized: Message = serde_json::from_str(&serialized)?;
 
         assert_eq!(message.text(), deserialized.text());
-        assert_eq!(message.tool_request().len(), deserialized.tool_request().len());
+        assert_eq!(
+            message.tool_request().len(),
+            deserialized.tool_request().len()
+        );
         assert_eq!(
             message.tool_request()[0].clone().call.unwrap().name,
             deserialized.tool_request()[0].clone().call.unwrap().name

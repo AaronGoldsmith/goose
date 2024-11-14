@@ -7,8 +7,9 @@ use std::time::Duration;
 use super::base::{Provider, Usage};
 use super::configs::DatabricksProviderConfig;
 use super::types::message::Message;
-use super:: utils::{
-        check_openai_context_length_error, messages_to_openai_spec, openai_response_to_message, tools_to_openai_spec,
+use super::utils::{
+    check_openai_context_length_error, messages_to_openai_spec, openai_response_to_message,
+    tools_to_openai_spec,
 };
 use crate::tool::Tool;
 

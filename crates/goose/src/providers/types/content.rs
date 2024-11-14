@@ -1,8 +1,8 @@
+use crate::errors::{AgentError, AgentResult};
+use crate::tool::ToolCall;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use crate::tool::ToolCall;
-use crate::errors::{AgentResult, AgentError};
 
 // Text content
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -16,7 +16,6 @@ impl Text {
         Self { text: text.into() }
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 /// A request for a tool call from the agent
@@ -57,7 +56,6 @@ impl ToolResponse {
     }
 }
 
-
 // Enum to handle all content types
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
@@ -79,7 +77,11 @@ impl Content {
     }
 
     /// Create a new ToolRequest content with a successful tool call
-    pub fn tool_request_success<T: Into<String>, S: Into<String>>(id: T, name: S, parameters: Value) -> Self {
+    pub fn tool_request_success<T: Into<String>, S: Into<String>>(
+        id: T,
+        name: S,
+        parameters: Value,
+    ) -> Self {
         Content::ToolRequest(ToolRequest {
             id: id.into(),
             call: Ok(ToolCall::new(name, parameters)),
@@ -121,21 +123,15 @@ impl Content {
                     call.name,
                     serde_json::to_string(&call.parameters).unwrap_or_default()
                 ),
-                Err(err) => format!(
-                    "content:tool_use:error\nerror:{}",
-                    err.to_string()
-                )
-            }
+                Err(err) => format!("content:tool_use:error\nerror:{}", err.to_string()),
+            },
             Content::ToolResponse(t) => match &t.output {
                 Ok(value) => format!(
                     "content:tool_result\noutput:{}",
                     serde_json::to_string(&value).unwrap_or("".to_string())
                 ),
-                Err(err) => format!(
-                    "content:tool_result:error\nerror:{}",
-                    err.to_string()
-                )
-            }
+                Err(err) => format!("content:tool_result:error\nerror:{}", err.to_string()),
+            },
         }
     }
 }

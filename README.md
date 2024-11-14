@@ -57,4 +57,16 @@ export OLLAMA_HOST=http://localhost:11434
 
 # First run: ollama pull qwen2.5
 cargo run --bin goose -- --provider ollama --model qwen2.5
+
+
+## Troubleshooting
+
+#### Compiling `tokenizers` library
+
+`tokenizers` depends on `esaxx-rs` which failed to compile because 'cstdint' file
+was not found. The following fixed it:
+```
+export CXXFLAGS="-isystem $(xcrun --show-sdk-path)/usr/include/c++/v1"
+cargo check
+
 ```

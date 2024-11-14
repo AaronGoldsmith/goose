@@ -4,8 +4,8 @@ use serde_json::{json, Value};
 
 use super::types::content::{Content, Text};
 use super::types::message::{Message, Role};
-use crate::tool::{Tool};
 use crate::errors::AgentError;
+use crate::tool::Tool;
 
 /// Convert internal Message format to OpenAI's API message specification
 pub fn messages_to_openai_spec(messages: &[Message]) -> Vec<Value> {
@@ -23,34 +23,32 @@ pub fn messages_to_openai_spec(messages: &[Message]) -> Vec<Value> {
                 Content::Text(Text { text }) => {
                     converted["content"] = json!(text);
                 }
-                Content::ToolRequest(tool_request) => {
-                    match &tool_request.call {
-                        Ok(tool_call) => {
-                            let sanitized_name = sanitize_function_name(&tool_call.name);
-                            let tool_calls = converted
-                                .as_object_mut()
-                                .unwrap()
-                                .entry("tool_calls")
-                                .or_insert(json!([]));
+                Content::ToolRequest(tool_request) => match &tool_request.call {
+                    Ok(tool_call) => {
+                        let sanitized_name = sanitize_function_name(&tool_call.name);
+                        let tool_calls = converted
+                            .as_object_mut()
+                            .unwrap()
+                            .entry("tool_calls")
+                            .or_insert(json!([]));
 
-                            tool_calls.as_array_mut().unwrap().push(json!({
-                                "id": tool_request.id,
-                                "type": "function",
-                                "function": {
-                                    "name": sanitized_name,
-                                    "arguments": tool_call.parameters.to_string(),
-                                }
-                            }));
-                        }
-                        Err(e) => {
-                            output.push(json!({
-                                "role": "tool",
-                                "content": format!("Error: {}", e),
-                                "tool_call_id": tool_request.id
-                            }));
-                        }
+                        tool_calls.as_array_mut().unwrap().push(json!({
+                            "id": tool_request.id,
+                            "type": "function",
+                            "function": {
+                                "name": sanitized_name,
+                                "arguments": tool_call.parameters.to_string(),
+                            }
+                        }));
                     }
-                }
+                    Err(e) => {
+                        output.push(json!({
+                            "role": "tool",
+                            "content": format!("Error: {}", e),
+                            "tool_call_id": tool_request.id
+                        }));
+                    }
+                },
                 Content::ToolResponse(tool_response) => {
                     match &tool_response.output {
                         Ok(value) => {
@@ -282,21 +280,16 @@ mod tests {
             Message::user("How are you?")?,
             Message::new(
                 Role::Assistant,
-                vec![Content::tool_request(
-                    "tool1", json!({"param1": "value1"}),
-                )],
+                vec![Content::tool_request("tool1", json!({"param1": "value1"}))],
             )?,
         ];
-        let Content::ToolRequest(request) = &messages[2].content[0] else {panic!("should be request")};
-        messages.push(
-            Message::new(
-                Role::User,
-                vec![Content::tool_response(
-                    &request.id,
-                    "Result".into()
-                )]
-            )?
-        );
+        let Content::ToolRequest(request) = &messages[2].content[0] else {
+            panic!("should be request")
+        };
+        messages.push(Message::new(
+            Role::User,
+            vec![Content::tool_response(&request.id, "Result".into())],
+        )?);
 
         let spec = messages_to_openai_spec(&messages);
 
@@ -401,7 +394,7 @@ mod tests {
 
         let message = openai_response_to_message(response)?;
         let tool_requests = message.tool_request();
-        
+
         match &tool_requests[0].call {
             Err(AgentError::ToolNotFound(msg)) => {
                 assert!(msg.starts_with("The provided function name"));

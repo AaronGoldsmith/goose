@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::tool::{Tool, ToolCall};
 use crate::errors::AgentResult;
+use crate::tool::{Tool, ToolCall};
 
 /// Core trait that defines a system that can be operated by an AI agent
 #[async_trait]

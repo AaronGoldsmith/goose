@@ -10,18 +10,6 @@ use crate::errors::{AgentError, AgentResult};
 use crate::systems::System;
 use crate::tool::{Tool, ToolCall};
 
-// Helper function to get the language from a file extension
-#[allow(dead_code)]
-fn get_language_from_extension(path: &Path) -> &str {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some("rs") => "rust",
-        Some("py") => "python",
-        Some("js") => "javascript",
-        Some("txt") => "text",
-        _ => "text",
-    }
-}
-
 pub struct DeveloperSystem {
     tools: Vec<Tool>,
     cwd: Mutex<PathBuf>,
@@ -57,7 +45,7 @@ impl DeveloperSystem {
                     "working_dir": {
                         "type": "string",
                         "default": null,
-                        "description": "The directory to change to."
+                        "description": "The directory to change to. The path must be absolute or relative to the current working directory. Defaults to the current working directory."
                     }
                 }
             }),
@@ -93,12 +81,6 @@ impl DeveloperSystem {
                         "default": null,
                         "description": "Required for `create` command."
                     },
-                    "view_range": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "default": null,
-                        "description": "Optional for `view` command when viewing a file."
-                    },
                     "insert_line": {
                         "type": "integer",
                         "default": null,
@@ -133,33 +115,34 @@ impl DeveloperSystem {
 
     // Implement bash tool functionality
     async fn bash(&self, params: Value) -> AgentResult<Value> {
+        let working_dir = params
+            .get("working_dir")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
         let command = params.get("command").and_then(|v| v.as_str());
         let source_path = params.get("source_path").and_then(|v| v.as_str());
-        let working_dir = params.get("working_dir").and_then(|v| v.as_str());
 
-        if command.is_none() && source_path.is_none() && working_dir.is_none() {
+        if command.is_none() && source_path.is_none() {
             return Err(AgentError::InvalidParameters(
-                "At least one parameter must be provided".into(),
+                "At least one of 'command' or 'source_path' must be provided".into(),
             ));
         }
 
         let mut outputs = Vec::new();
 
         // Change working directory
-        if let Some(dir) = working_dir {
-            let new_cwd = self.resolve_path(dir)?;
-            if !new_cwd.is_dir() {
-                return Err(AgentError::InvalidParameters(format!(
-                    "The directory '{}' does not exist",
-                    dir
-                )));
-            }
-            {
-                let mut cwd = self.cwd.lock().unwrap();
-                *cwd = new_cwd;
-            }
-            outputs.push(format!("Changed directory to: {}", dir));
+        let new_cwd = self.resolve_path(working_dir)?;
+        if !new_cwd.is_dir() {
+            return Err(AgentError::InvalidParameters(format!(
+                "The directory '{}' does not exist",
+                new_cwd.display()
+            )));
         }
+        {
+            let mut cwd = self.cwd.lock().unwrap();
+            *cwd = new_cwd.clone();
+        }
+        outputs.push(format!("Changed directory to: {}", new_cwd.display()));
 
         // Source a file
         if let Some(source) = source_path {
@@ -170,7 +153,48 @@ impl DeveloperSystem {
                     source
                 )));
             }
-            // TODO this is not yet implemented
+            // Scope the mutex lock for cwd and env
+            {
+                let cwd = self.cwd.lock().unwrap().clone();
+                let env = self.env.lock().unwrap().clone();
+
+                let source_command = format!("source \"{}\" && env", source_file.display());
+
+                let output = Command::new("bash")
+                    .arg("-c")
+                    .arg(&source_command)
+                    .current_dir(cwd)
+                    .envs(env)
+                    .output()
+                    .map_err(|e| {
+                        AgentError::ExecutionError(format!(
+                            "Failed to execute source command: {}",
+                            e
+                        ))
+                    })?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(AgentError::ExecutionError(stderr.to_string()));
+                }
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+
+                // Parse env variables from stdout
+                let mut new_env = HashMap::new();
+                for line in stdout.lines() {
+                    if let Some((key, value)) = line.split_once('=') {
+                        new_env.insert(key.to_string(), value.to_string());
+                    }
+                }
+
+                // Update self.env
+                {
+                    let mut env = self.env.lock().unwrap();
+                    *env = new_env;
+                }
+            }
+
             outputs.push(format!("Sourced {}", source));
         }
 
@@ -179,7 +203,7 @@ impl DeveloperSystem {
             // TODO these messages should be more clear, these are alternatives solved with other tools
             // TODO we also need guardrails
             // Disallow certain commands for safety
-            let disallowed_commands = ["cat", "cd", "source"];
+            let disallowed_commands = ["cat", "cd", "source", "rm", "kill"];
             for disallowed in &disallowed_commands {
                 if cmd_str.trim_start().starts_with(disallowed) {
                     return Err(AgentError::InvalidParameters(format!(
@@ -192,23 +216,24 @@ impl DeveloperSystem {
             let cwd = self.cwd.lock().unwrap();
             let env = self.env.lock().unwrap();
 
+            // Redirect stderr to stdout to interleave outputs
+            let cmd_with_redirect = format!("{} 2>&1", cmd_str);
+
             // Execute the command
             let output = Command::new("bash")
                 .arg("-c")
-                .arg(cmd_str)
+                .arg(cmd_with_redirect)
                 .current_dir(&*cwd)
                 .envs(&*env)
                 .output()
                 .map_err(|e| AgentError::ExecutionError(e.to_string()))?;
 
-            // TODO we should probably interleave stdout and stderr
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let output_str = String::from_utf8_lossy(&output.stdout).to_string();
+
             if !output.status.success() {
-                return Err(AgentError::ExecutionError(stderr));
+                return Err(AgentError::ExecutionError(output_str));
             }
-            outputs.push(stdout);
-            outputs.push(stderr);
+            outputs.push(output_str);
         }
 
         Ok(json!({ "result": outputs.join("\n") }))
@@ -229,7 +254,7 @@ impl DeveloperSystem {
         let path = self.resolve_path(path_str)?;
 
         match command {
-            "view" => self.text_editor_view(&path, params.get("view_range")).await,
+            "view" => self.text_editor_view(&path).await,
             "create" => {
                 let file_text = params
                     .get("file_text")
@@ -281,59 +306,16 @@ impl DeveloperSystem {
         }
     }
 
-    async fn text_editor_view(
-        &self,
-        path: &PathBuf,
-        view_range: Option<&Value>,
-    ) -> AgentResult<Value> {
+    async fn text_editor_view(&self, path: &PathBuf) -> AgentResult<Value> {
         if path.is_file() {
             // Read the file content
             let content = std::fs::read_to_string(path)
                 .map_err(|e| AgentError::ExecutionError(format!("Failed to read file: {}", e)))?;
 
-            // TODO how does view range interact with active files
-            // Handle view_range if provided
-            let lines: Vec<&str> = content.lines().collect();
-            let viewed_content = if let Some(range_value) = view_range {
-                let range = range_value.as_array().ok_or_else(|| {
-                    AgentError::InvalidParameters("Invalid 'view_range' parameter".into())
-                })?;
-
-                if range.len() != 2 {
-                    return Err(AgentError::InvalidParameters(
-                        "'view_range' must be an array of two integers".into(),
-                    ));
-                }
-
-                let start_line = range[0].as_u64().ok_or_else(|| {
-                    AgentError::InvalidParameters("Invalid 'view_range' start line".into())
-                })? as usize;
-
-                let end_line = range[1].as_i64().ok_or_else(|| {
-                    AgentError::InvalidParameters("Invalid 'view_range' end line".into())
-                })?;
-
-                let end_line = if end_line == -1 {
-                    lines.len()
-                } else {
-                    end_line as usize
-                };
-
-                if start_line == 0 || start_line > lines.len() || end_line > lines.len() {
-                    return Err(AgentError::InvalidParameters(
-                        "'view_range' is out of bounds".into(),
-                    ));
-                }
-
-                lines[start_line - 1..end_line].join("\n")
-            } else {
-                content
-            };
-
             // Add to active files
             self.active_files.lock().unwrap().insert(path.clone());
 
-            Ok(json!({ "content": viewed_content }))
+            Ok(json!({ "content": content }))
         } else if path.is_dir() {
             // List directory contents
             let entries = std::fs::read_dir(path).map_err(|e| {
@@ -561,10 +543,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bash_missing_parameters() {
+        let system = get_system().await;
+
+        let tool_call = ToolCall::new("bash", json!({"working_dir": "."}));
+        let error = system.call(tool_call).await.unwrap_err();
+        assert!(matches!(error, AgentError::InvalidParameters(_)));
+    }
+
+    #[tokio::test]
     async fn test_bash_change_directory() {
         let system = get_system().await;
 
-        let tool_call = ToolCall::new("bash", json!({ "working_dir": "." }));
+        let tool_call = ToolCall::new("bash", json!({ "working_dir": ".", "command": "pwd" }));
         let result = system.call(tool_call).await.unwrap();
         assert!(result["result"]
             .as_str()
