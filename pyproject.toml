@@ -17,6 +17,9 @@ dependencies = [
     "beautifulsoup4>=4.9.3",
     "pyshadow<=0.0.5",
     "google-workspace>=0.20.3",
+    "pydantic>=2.10.1",
+    "networkx>=3.4.2",
+    "matplotlib>=3.9.2",
 ]
 
 author = [{ name = "Block", email = "ai-oss-tools@block.xyz" }]
@@ -39,6 +42,7 @@ synopsis = "goose.synopsis.toolkit:SynopsisDeveloper"
 browser = "goose.toolkit.web_browser:BrowserToolkit"
 memory = "goose.toolkit.memory:Memory"
 google_workspace = "goose.toolkit.google_workspace:GoogleWorkspace"
+experience = "goose.toolkit.experiences:MemoryGraph"
 
 [project.entry-points."goose.profile"]
 default = "goose.profile:default_profile"
