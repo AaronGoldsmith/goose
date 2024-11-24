@@ -9,14 +9,14 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from enum import Enum
 from threading import RLock
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 from uuid import uuid4
 
+import matplotlib.lines as mlines
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import networkx as nx
 from networkx import Graph
-from pydantic import BaseModel, Field
-from rich.console import Console
 from rich.markdown import Markdown
 from rich.rule import Rule
 
@@ -28,92 +28,12 @@ from goose.toolkit.utils import RULEPREFIX, RULESTYLE
 # logger = logging.getLogger(__name__)
 
 
-
-
-class RelationshipType(str, Enum):
-    # Causal Relationships
-    CAUSES = "causes"
-    LEADS_TO = "leads_to"
-    RESULTS_IN = "results_in"
-    ENABLES = "enables"
-    FACILITATES = "facilitates"
-
-    # Positive Relationships
-    SUPPORTS = "supports"
-    ENHANCES = "enhances"
-    CONTRIBUTES_TO = "contributes_to"
-    COMPLEMENTS = "complements"
-    ENCOURAGES = "encourages"
-
-    # Negative Relationships
-    CONFLICTS_WITH = "conflicts_with"
-    HINDERS = "hinders"
-    DETRACTS_FROM = "detracts_from"
-    OPPOSES = "opposes"
-    UNDERMINES = "undermines"
-
-    # Contextual Relationships
-    OCCURS_BEFORE = "occurs_before"
-    IS_PART_OF = "is_part_of"
-    RELATES_TO = "relates_to"
-    FOLLOWS = "follows"
-    STEMS_FROM = "stems_from"
-    SHARES_CONTEXT_WITH = "shares_context_with"
-
-    # Hierarchical Relationships
-    IS_SUBEVENT_OF = "is_subevent_of"
-    BELONGS_TO = "belongs_to"
-    FORMS_PART_OF = "forms_part_of"
-
-    # Additional Relationships
-    REPRESENTS = "represents"
-    MIRRORS = "mirrors"
-    INFORMS = "informs"
-    GUIDES = "guides"
-    EXEMPLIFIES = "exemplifies"
-
-
-class Relationship(BaseModel):
-    from_memory_title: Optional[str] = Field(None, max_length=255)
-    to_memory_title: Optional[str] = Field(None, max_length=255)
-    relationship_type: Optional[RelationshipType] = Field(None)
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
-
-    class Config:
-        extra = 'allow'
-        arbitrary_types_allowed = True
-
-    def to_dict(self):
-        return {
-            'from_memory_title': self.from_memory_title,
-            'to_memory_title': self.to_memory_title,
-            'relationship_type': self.relationship_type.name if self.relationship_type else None,
-            'metadata': self.metadata
-        }
-
-class Note(BaseModel):
-    content: str = Field(..., max_length=2048)
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
-    note_id: str = Field(default_factory=lambda: str(uuid4()), exclude=True)
-
-class Memory(BaseModel):
-    title: str = Field(..., max_length=255)
-    summary: str = Field(..., max_length=1024)
-    tags: List[str] = Field(default_factory=list)
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
-    memory_id: str = Field(default_factory=lambda: str(uuid4()), exclude=True)
-    notes: List[Note] = Field(default_factory=list)
-
-class Experience(BaseModel):
-    memories: List[Memory]
-    relationships: Optional[List[Relationship]] = Field(default_factory=list)
-
 class MemoryNotFoundError(Exception):
     pass
 
 
 class TagError(Exception):
-    def __init__(self, message: str, associated_memories: Optional[List[Dict[str, Any]]] = None):
+    def __init__(self, message: str, associated_memories: list[dict[str, any]] = []):
         super().__init__(message)
         self.associated_memories = associated_memories or []
 
@@ -136,47 +56,51 @@ class MemoryGraph(Toolkit):
         self.lock = RLock() 
         
         self._ensure_graph_dirs()
-
+   
     @tool
     def show_graph(
         self,
         node_size: int = 500,
         node_color_memories: str = 'skyblue',
         node_color_notes: str = 'lightgreen',
-        edge_color_related: str = 'gray',
-        edge_color_leads_to: str = 'blue',
+        tagged_node_colors: dict[str, str] = None,
+        edge_color: str = 'blue',
         edge_color_has_note: str = 'green',
-        figsize: Tuple[int, int] = (12, 8),
+        figsize: tuple[int, int] = (12, 8),
         with_labels: bool = True,
+        with_edge_labels: bool = False,
         font_size: int = 10,
-        title: Optional[str] = "Memory Graph",
+        title: str = "Memory Graph",
         save_dir: str = "graph_images",
-        filename: Optional[str] = None
+        filename: str = ''
     ) -> str:
         """
         Display the graph using matplotlib with aesthetic enhancements and save it locally.
     
         Parameters:
-            node_size (int, optional): Size of the nodes.
-            node_color_memories (str, optional): Color for memory nodes.
-            node_color_notes (str, optional): Color for note nodes.
-            edge_color_related (str, optional): Color for 'relates_to' relationships.
-            edge_color_leads_to (str, optional): Color for 'leads_to' relationships.
-            edge_color_has_note (str, optional): Color for 'has_note' relationships.
-            figsize (tuple, optional): Size of the matplotlib figure.
-            with_labels (bool, optional): Whether to display labels on nodes.
-            font_size (int, optional): Font size for labels.
-            title (str, optional): Title of the graph.
-            save_dir (str, optional): Directory to save the graph image.
-            filename (str, optional): Specific filename for the saved image. If None, a unique filename is generated.
+            node_size (int): Size of the nodes.
+            node_color_memories (str): Color for memory nodes.
+            node_color_notes (str): Color for note nodes.
+            tagged_node_colors (dict[str, str]): Tag names and their associated node colors.
+            edge_color (str): Color for relationships.
+            edge_color_has_note (str): Color for 'has_note' relationships.
+            figsize (tuple[int, int]): Size of the matplotlib figure.
+            with_labels (bool): Whether to display labels on nodes.
+            with_edge_labels (bool): Whether to display labels on edges
+            font_size (int): Font size for labels.
+            title (str): Title of the graph.
+            save_dir (str): Directory to save the graph image.
+            filename (str): Specific filename for the saved image. If None, a unique filename is generated.
     
         Returns:
-            str: A string in the format "image: <path_to_image>".
+            Result (str): A string in the format "image:<path_to_image>".
         """
         plt.figure(figsize=figsize)
         G = self.graph.copy()
-    
-        # Define node colors based on node type (memory or note)
+        if len(G.nodes) == 0:
+            return "The graph hasn't been created yet"
+        
+        # Define node colors based on node type (memory, note, or tags)
         node_colors = []
         node_shapes = []
         for node_id, data in G.nodes(data=True):
@@ -186,23 +110,27 @@ class MemoryGraph(Toolkit):
             elif 'content' in data:
                 node_colors.append(node_color_notes)
                 node_shapes.append('s')  # Square for notes
+            elif tagged_node_colors:
+                matched_tag = None
+                for tag, color in tagged_node_colors.items():
+                    if tag in data.get('tags', []):  # Check if the node has the tag
+                        matched_tag = color
+                        break
+                node_colors.append(matched_tag if matched_tag else 'grey')  # Default to grey if no tag matched
+                node_shapes.append('^')  # Triangle for tagged nodes
             else:
                 node_colors.append('grey')  # Default color
                 node_shapes.append('^')  # Triangle for undefined types
     
         # Define edge colors based on relationship type
         edge_colors = []
+        edge_relationship_types = set() 
+
         for u, v, data in G.edges(data=True):
             rel_type = data.get('relationship_type', 'relates_to')
-            if rel_type == 'relates_to':
-                edge_colors.append(edge_color_related)
-            elif rel_type == 'leads_to':
-                edge_colors.append(edge_color_leads_to)
-            elif rel_type == 'has_note':
-                edge_colors.append(edge_color_has_note)
-            else:
-                edge_colors.append('black')  # Default edge color
-    
+            edge_colors.append(edge_color if rel_type != 'has_note' else edge_color_has_note)
+            edge_relationship_types.add(rel_type)
+
         # Choose a layout for the graph
         pos = nx.spring_layout(G, k=0.5, iterations=50, seed=42)
     
@@ -218,8 +146,7 @@ class MemoryGraph(Toolkit):
                 node_color=shaped_node_colors,
                 node_size=node_size,
                 node_shape=shape,
-                alpha=0.9,
-                label='Memory' if shape == 'o' else 'Note' if shape == 's' else 'Other'
+                alpha=0.9
             )
     
         # Draw edges
@@ -233,39 +160,63 @@ class MemoryGraph(Toolkit):
             arrowstyle='->',
             arrowsize=15
         )
-    
+
+        # Add edge relationship types to the legend if edge labels are not shown
+        legend_handles = []
+        if not with_edge_labels:
+            for rel_type in edge_relationship_types:
+                if rel_type == 'has_note':
+                    legend_handles.append(mlines.Line2D([], [], color=edge_color_has_note, label='Has Note', linewidth=2))
+                else:
+                    legend_handles.append(mlines.Line2D([], [], color=edge_color, label=rel_type, linewidth=2))
+
+        if with_edge_labels:
+            # Draw edge labels
+            edge_labels = {}
+            for u, v, data in G.edges(data=True):
+                if 'relationship_type' in data:
+                    edge_labels[(u, v)] = data['relationship_type']
+
+            nx.draw_networkx_edge_labels(
+                G,
+                pos,
+                edge_labels=edge_labels,
+                font_size=font_size,
+                font_color='red'
+            )
+            
         # Draw labels
         if with_labels:
-            labels = {}
+            node_labels = {}
             for node_id, data in G.nodes(data=True):
                 if 'title' in data:
-                    labels[node_id] = data['title']
+                    node_labels[node_id] = data['title']
                 elif 'content' in data:
-                    labels[node_id] = f"Note: {data['content'][:20]}..."  # Truncate long notes
+                    node_labels[node_id] = f"Note: {data['content'][:20]}..."  # Truncate long notes
                 else:
-                    labels[node_id] = node_id  # Fallback to node ID
+                    node_labels[node_id] = node_id  # Fallback to node ID
+            
             nx.draw_networkx_labels(
                 G,
                 pos,
-                labels=labels,
+                labels=node_labels,
                 font_size=font_size,
                 font_color='black'
             )
-    
-        # Create legend manually
-        import matplotlib.lines as mlines
-        import matplotlib.patches as mpatches
 
         # Define legend elements
         memory_patch = mpatches.Patch(color=node_color_memories, label='Memory')
         note_patch = mpatches.Patch(color=node_color_notes, label='Note')
-        related_line = mlines.Line2D([], [], color=edge_color_related, label='Related To', linewidth=2)
-        leads_to_line = mlines.Line2D([], [], color=edge_color_leads_to, label='Leads To', linewidth=2)
-        has_note_line = mlines.Line2D([], [], color=edge_color_has_note, label='Has Note', linewidth=2)
+        legend_handles = [memory_patch, note_patch]
+        
+        if tagged_node_colors:
+            for tag, color in tagged_node_colors.items():
+                legend_handles.append(mpatches.Patch(color=color, label=tag))
+        
     
         # Position legend outside the plot
         plt.legend(
-            handles=[memory_patch, note_patch, related_line, leads_to_line, has_note_line],
+            handles=legend_handles,
             loc='upper left',
             bbox_to_anchor=(1, 1),
             fontsize='small'
@@ -298,10 +249,16 @@ class MemoryGraph(Toolkit):
         # Return the image path as a URL string
         return "could not save graph"
 
+
     @tool
-    def print_graph(self):
+    def print_graph(self) -> str:
         """
         Print the entire graph structure, including nodes and edges with their attributes.
+        Parameters:
+           None
+
+        Returns:
+            graph (str): A textual representation of the graph
         """
         text_representation = "\n--- Graph Nodes ---"
         with self.lock:
@@ -317,59 +274,67 @@ class MemoryGraph(Toolkit):
         return text_representation
 
     @tool
-    def add_experience(self, experience: Experience) -> Dict[str, str]:
+    def build_structured_relationship(self, nodes: list[dict[str, Union[str, dict]]], relationships: list[dict]) -> dict[str, str]:
         """
-        Add multiple memories, relationships, and optional notes in a single operation.
+        Saves an graph consisting of nodes and their relationships (edges).
 
-        Parameters:
-            experience (Experience): An Experience instance containing memories and relationships.
+        Args:
+            nodes (list[dict]): A list of nodes.
+                - title (str): Title of the node.
+                - summary (str): Summary of the node.
+                - tags (list[str]): Tags associated with the node.
+                - notes (list[dict]): Notes related to the node.
+
+            relationships (list[dict]): A list of relationships between node. 
+                - from_node_title (str or None): Title of the source node.
+                - to_node_title (str or None): Title of the target node.
+                - relationship_type (str or None): Type of the relationship.
 
         Returns:
-            dict: A mapping of memory titles to their unique IDs.
+            node_id_map (dict[str, str]): A mapping of node titles to their unique IDs.
 
-        Raises:
-            TagError: If any of the provided tags do not exist.
-            ValueError: If relationship definitions are invalid or duplicate titles are found.
         """
-        memory_id_map = {}  # Maps memory titles to their unique IDs
+
+        node_id_map = {}  # Maps memory titles to their unique IDs
 
         # Check for duplicates across the entire graph
         existing_titles = set()
-        for memory in experience.memories:
-            if memory.title in self.title_index and self.title_index[memory.title]:
-                raise ValueError(f"Memory title '{memory.title}' already exists in the graph.")
-            existing_titles.add(memory.title)
+        for node in nodes:
+            if node['title'] in self.title_index and self.title_index[node['title']]:
+                raise ValueError(f"Memory title '{node['title']}' already exists in the graph.")
+            existing_titles.add(node['title'])
 
         with self.lock:
             # First, add all memories
-            for memory in experience.memories:
+            for node in nodes:
+                for tag in node['tags']:
+                    if tag not in self.tag_set:
+                        self.add_tag(tag)
                 # Add the memory
                 memory_id = self.add_memory(
-                    title=memory.title,
-                    summary=memory.summary,
-                    tags=memory.tags,
-                    **memory.metadata
+                    title=node['title'],
+                    summary=node['summary'],
+                    tags=node['tags'], 
                 )
-                memory_id_map[memory.title] = memory_id
+                node_id_map[node['title']] = memory_id
 
                 # Add associated notes, if any
-                for note in memory.notes:
+                for note in node['notes']:
                     self.add_note(
                         memory_id=memory_id,
-                        content=note.content,
-                        **note.metadata
+                        content=note['content'],  
+                        **note.get('metadata', {})
                     )
 
             # Then, establish relationships
-            for relationship in experience.relationships:
-                from_title = relationship.from_memory_title
-                to_title = relationship.to_memory_title
-                rel_type = relationship.relationship_type
-                rel_metadata = relationship.metadata
+            for relationship in relationships:
+                from_title = relationship['from_memory_title']
+                to_title = relationship['to_memory_title']
+                rel_type = relationship['relationship_type']
 
                 # Retrieve memory IDs from titles
-                from_id = memory_id_map.get(from_title)
-                to_id = memory_id_map.get(to_title)
+                from_id = node_id_map.get(from_title)
+                to_id = node_id_map.get(to_title)
 
                 if not from_id:
                     raise ValueError(f"Memory with title '{from_title}' not found in provided memories.")
@@ -382,13 +347,11 @@ class MemoryGraph(Toolkit):
                     from_memory_id=from_id,
                     to_memory_id=to_id,
                     relationship_type=rel_type,
-                    **rel_metadata
                 )
 
-        return memory_id_map
-    ### Tag Management Methods ###
+        return node_id_map
     
-    @tool
+    ### Tag Management Methods ###
     def add_tag(self, tag: str) -> None:
         """
         Add a new tag to the tag set.
@@ -401,76 +364,30 @@ class MemoryGraph(Toolkit):
         """
         sanitized_tag = self._sanitize_tag(tag)
         with self.lock:
-            if sanitized_tag in self.tag_set:
-                raise TagError(f"Tag '{sanitized_tag}' already exists.")
             self.tag_set.add(sanitized_tag)
-            self.tag_index[sanitized_tag]  # Initialize the tag index
-            self.notifier.log(Rule(RULEPREFIX + f"Added Tag: {sanitized_tag}", style=RULESTYLE, align="left"))
-            # self.audit_log.append({
-            #     'action': 'add_tag',
-            #     'tag': sanitized_tag,
-            #     'timestamp': self._current_timestamp()
-            # })
-            # logger.info(f"Tag added: {sanitized_tag}")
+            return f"Added tag: {sanitized_tag}"
+        
+        return f"Added tag: {tag}"
 
     @tool
-    def remove_tag(self, tag: str) -> None:
-        """
-        Remove a tag from the tag set.
-
-        Parameters:
-            tag (str): The tag to be removed.
-
-        Raises:
-            TagError: If the tag does not exist or is associated with memories.
-        """
-        sanitized_tag = self._sanitize_tag(tag)
-        with self.lock:
-            if sanitized_tag not in self.tag_set:
-                raise TagError(f"Tag '{sanitized_tag}' does not exist.")
-            
-            associated_memories = self.search_memories_by_tags([sanitized_tag], match_all=True)
-            print(associated_memories)
-            if associated_memories:
-                # Prepare a list of memory titles or IDs
-                memory_details = [
-                    {"memory_id": mem_id, "title": mem_data.get("title", "Untitled")}
-                    for mem_id, mem_data in associated_memories
-                ]
-                raise TagError(
-                    f"Tag '{sanitized_tag}' is associated with the following memories and cannot be removed.",
-                    associated_memories=memory_details
-                )
-            
-            # If no associated memories, proceed to remove the tag
-            self.tag_set.remove(sanitized_tag)
-            del self.tag_index[sanitized_tag]
-            # self.audit_log.append({
-            #     'action': 'remove_tag',
-            #     'tag': sanitized_tag,
-            #     'timestamp': self._current_timestamp()
-            # })
-            # logger.info(f"Tag removed: {sanitized_tag}")
-
-    @tool
-    def list_tags(self) -> List[str]:
+    def list_tags(self) -> list[str]:
         """
         List all available tags.
 
         Returns:
-            list: A list of all tags.
+            sorted_tags (list[str]): A list of all tags.
         """
         with self.lock:
             return sorted(list(self.tag_set))
 
-    ### Memory Management Methods ###
+    # ### Memory Management Methods ###
     @tool
     def add_memory(
         self,
         title: str,
         summary: str,
-        tags: Optional[List[str]] = None,
-        **metadata: Any
+        tags: list[str],
+        **metadata: any
     ) -> str:
         """
         Add a memory node with metadata and optional tags.
@@ -479,13 +396,12 @@ class MemoryGraph(Toolkit):
             title (str): Title of the memory.
             summary (str): Summary or content of the memory.
             tags (list, optional): List of tags to associate with the memory.
-            metadata: Additional metadata as key-value pairs.
+            metadata (any): Additional metadata as key-value pairs.
 
         Returns:
-            str: The unique ID of the added memory.
+            memory_id (str): The unique ID of the added memory.
 
         Raises:
-            TagError: If any of the provided tags do not exist in the tag set.
             ValueError: If title or summary is invalid.
         """
         with self.lock:
@@ -500,14 +416,14 @@ class MemoryGraph(Toolkit):
                 for tag in tags:
                     sanitized_tag = self._sanitize_tag(tag)
                     if sanitized_tag not in self.tag_set:
-                        raise TagError(f"Tag '{sanitized_tag}' does not exist. Please add it before using.")
+                        self.add_tag(sanitized_tag)
                     memory_tags.add(sanitized_tag)
 
             if title in self.title_index and self.title_index[title]:
                 raise ValueError(f"A memory with the title '{title}' already exists.")
 
             # Generate a unique memory ID
-            memory_id = str(uuid.uuid4())
+            memory_id = str(uuid.uuid4())[:8]
 
             # Add the memory node
             self.graph.add_node(memory_id, title=title, summary=summary, tags=list(memory_tags), **sanitized_metadata)
@@ -520,26 +436,16 @@ class MemoryGraph(Toolkit):
             self.notifier.log(Rule(RULEPREFIX + f"Added Memory: {title}", style=RULESTYLE, align="left"))
             memory_details = f"**Title:** {title}\n**Summary:** {summary}\n**Tags:** {', '.join(tags)}\n**Metadata:** {metadata}"
             self.notifier.log(Markdown(memory_details))
-            # Audit log
-            # self.audit_log.append({
-            #     'action': 'add_memory',
-            #     'memory_id': memory_id,
-            #     'title': title,
-            #     'tags': list(memory_tags),
-            #     'timestamp': self._current_timestamp()
-            # })
-            # logger.info(f"Memory added: ID={memory_id}, Title='{title}'")
-
             return memory_id
 
     @tool
     def update_memory(
         self,
         memory_id: str,
-        title: Optional[str] = None,
-        summary: Optional[str] = None,
-        tags: Optional[List[str]] = None,
-        **metadata: Any
+        title: str = '',
+        summary: str = '',
+        tags: list[str] = [],
+        **metadata: any
     ) -> None:
         """
         Update an existing memory's details and tags.
@@ -549,12 +455,10 @@ class MemoryGraph(Toolkit):
             title (str, optional): New title.
             summary (str, optional): New summary.
             tags (list, optional): New list of tags.
-            metadata: Additional metadata to update.
+            metadata (any): Additional metadata to update.
 
         Raises:
             MemoryNotFoundError: If the memory ID does not exist.
-            TagError: If any of the provided tags do not exist in the tag set.
-            ValueError: If attempting to overwrite reserved keys.
         """
         with self.lock:
             if memory_id not in self.graph:
@@ -572,12 +476,12 @@ class MemoryGraph(Toolkit):
                 if not self.title_index[old_title]:
                     del self.title_index[old_title]
                 self.title_index[sanitized_title].append(memory_id)
-                # logger.info(f"Memory ID={memory_id} title updated from '{old_title}' to '{sanitized_title}'")
+                self.notifier.log(f"Memory ID={memory_id} title updated from '{old_title}' to '{sanitized_title}'")
 
             # Update summary
             if summary:
                 node['summary'] = self._sanitize_input(summary, max_length=1024)
-                # logger.info(f"Memory ID={memory_id} summary updated.")
+                self.notifier.log(f"Memory ID={memory_id} summary updated.")
 
             # Update metadata
             reserved_keys = {'title', 'summary', 'tags'}
@@ -585,7 +489,6 @@ class MemoryGraph(Toolkit):
                 if key in reserved_keys:
                     raise ValueError(f"Cannot overwrite reserved key '{key}' in metadata.")
                 node[key] = self._sanitize_input(value)
-                # logger.info(f"Memory ID={memory_id} metadata '{key}' updated.")
 
             # Update tags
             if tags is not None:
@@ -601,7 +504,7 @@ class MemoryGraph(Toolkit):
                 for tag in tags:
                     sanitized_tag = self._sanitize_tag(tag)
                     if sanitized_tag not in self.tag_set:
-                        raise TagError(f"Tag '{sanitized_tag}' does not exist. Please add it before using.")
+                        self.add_tag(sanitized_tag)
                     new_tags.add(sanitized_tag)
 
                 # Update node tags
@@ -611,17 +514,10 @@ class MemoryGraph(Toolkit):
                 for tag in new_tags:
                     self.tag_index[tag].add(memory_id)
 
-                # logger.info(f"Memory ID={memory_id} tags updated to {list(new_tags)}")
-
-            # Audit log
-            # self.audit_log.append({
-            #     'action': 'update_memory',
-            #     'memory_id': memory_id,
-            #     'timestamp': self._current_timestamp()
-            # })
+                self.notifier.log(f"Memory ID={memory_id} tags updated to {list(new_tags)}")
 
     @tool
-    def retrieve_memory(self, memory_id: str) -> Dict[str, Any]:
+    def retrieve_memory(self, memory_id: str) -> dict[str, str]:
         """
         Retrieve a memory and its metadata by ID.
 
@@ -629,7 +525,7 @@ class MemoryGraph(Toolkit):
             memory_id (str): The ID of the memory to retrieve.
 
         Returns:
-            dict: The memory's data.
+           memory (dict[str, str]): The memory's data.
 
         Raises:
             MemoryNotFoundError: If the memory ID does not exist.
@@ -641,7 +537,7 @@ class MemoryGraph(Toolkit):
                 raise MemoryNotFoundError(f"Memory with ID '{memory_id}' not found.")
 
     @tool
-    def get_memory_by_title(self, title: str) -> List[Tuple[str, Dict[str, Any]]]:
+    def get_memory_by_title(self, title: str) -> list:
         """
         Search and retrieve memories by title.
 
@@ -649,7 +545,7 @@ class MemoryGraph(Toolkit):
             title (str): The title to search for.
 
         Returns:
-            list: A list of tuples containing memory IDs and their data.
+            memories (list): A list of tuples containing memory IDs and their data.
         """
         with self.lock:
             sanitized_title = self._sanitize_input(title, max_length=255)
@@ -657,7 +553,7 @@ class MemoryGraph(Toolkit):
             return [(node_id, self.graph.nodes[node_id]) for node_id in node_ids] if node_ids else []
 
     @tool
-    def search_memories_by_title_partial(self, search_term: str) -> List[Tuple[str, Dict[str, Any]]]:
+    def search_memories_by_title_partial(self, search_term: str) -> list:
         """
         Search and retrieve memories by partial title match.
 
@@ -665,7 +561,7 @@ class MemoryGraph(Toolkit):
             search_term (str): The substring to search for in titles.
 
         Returns:
-            list: A list of tuples containing memory IDs and their data.
+            memories (list): A list of tuples containing memory IDs and their data.
         """
         with self.lock:
             pattern = re.compile(re.escape(search_term), re.IGNORECASE)
@@ -677,25 +573,21 @@ class MemoryGraph(Toolkit):
             return result
 
     @tool
-    def view_memories_at_node(
+    def get_neighbors(
         self,
         node_id: str,
         depth: int = 3,
         title_only: bool = False,
-        relationship_filter: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
+    ) -> dict:
         """
-        View memories connected to a specific node up to a certain depth,
-        optionally filtering by relationship types.
+        View neighbors connected to a specific node, up to a certain depth
 
         Parameters:
             node_id (str): The ID of the starting node.
-            depth (int, optional): The depth of traversal. Defaults to 3.
-            title_only (bool, optional): If True, return only titles. Defaults to False.
-            relationship_filter (list, optional): List of relationship types to include.
-
+            depth (int): The depth of traversal. Defaults to 3.
+            title_only (bool): If True, return only titles. Defaults to False.
         Returns:
-            dict: A dictionary of connected memories up to the specified depth.
+            nodes (dict): A dictionary of connected nodes up to the specified depth.
         """
         if not isinstance(depth, int) or depth < 1:
             raise ValueError("Depth must be a positive integer.")
@@ -719,23 +611,19 @@ class MemoryGraph(Toolkit):
 
                 if current_depth < depth:
                     for neighbor in self.graph.neighbors(current_node):
-                        edge_data = self.graph.get_edge_data(current_node, neighbor)
-                        if relationship_filter:
-                            if edge_data.get('relationship_type') not in relationship_filter:
-                                continue
                         if neighbor not in visited:
                             visited.add(neighbor)
                             queue.append((neighbor, current_depth + 1))
 
             return result
 
-    ### Tag-Based Search Methods ###
+    # ### Tag-Based Search Methods ###
     @tool
     def search_memories_by_tags(
         self,
-        tags: List[str],
+        tags: list[str],
         match_all: bool = False
-    ) -> List[Tuple[str, Dict[str, Any]]]:
+    ) -> list[tuple[str, dict[str, str]]]:
         """
         Search and retrieve memories by tags.
 
@@ -745,16 +633,13 @@ class MemoryGraph(Toolkit):
                               If False, return memories that have any of the specified tags.
 
         Returns:
-            list: A list of tuples containing memory IDs and their data.
-
-        Raises:
-            TagError: If any of the provided tags do not exist in the tag set.
+            memories (list[tuple[str, dict]]): A list of tuples containing memory IDs and their data.
         """
         with self.lock:
             sanitized_tags = [self._sanitize_tag(tag) for tag in tags]
             for tag in sanitized_tags:
                 if tag not in self.tag_set:
-                    raise TagError(f"Tag '{tag}' does not exist.")
+                    return f"Tag '{tag}' does not exist. Use List tags"
 
             if not sanitized_tags:
                 return []
@@ -770,14 +655,14 @@ class MemoryGraph(Toolkit):
 
             return [(memory_id, self.graph.nodes[memory_id]) for memory_id in matched_memories]
 
-    ### Note Management Methods ###
+    # ### Note Management Methods ###
     @tool
     def add_note(
         self,
         memory_id: str,
         content: str,
-        max_length: Optional[int] = 2048,
-        **metadata: Any
+        max_length: int = 2048,
+        **metadata: any
     ) -> str:
         """
         Add a note as a separate node connected to a memory.
@@ -785,11 +670,11 @@ class MemoryGraph(Toolkit):
         Parameters:
             memory_id (str): The ID of the memory to attach the note to.
             content (str): The content of the note.
-            max_length (int, optional): Maximum allowed length of the note content.
-            metadata: Additional metadata for the note.
+            max_length (int): Maximum allowed length of the note content.
+            metadata (any): Additional metadata for the note.
 
         Returns:
-            str: The unique ID of the added note.
+            note_id (str): The unique ID of the added note.
 
         Raises:
             MemoryNotFoundError: If the memory ID does not exist.
@@ -807,24 +692,17 @@ class MemoryGraph(Toolkit):
             note_id = str(uuid.uuid4())
 
             # Add the note node
-            self.graph.add_node(note_id, content=content, **sanitized_metadata)
+            self.graph.add_node(note_id, content=content, tags=["note"], **sanitized_metadata)
 
             # Connect the note to the memory
             self.graph.add_edge(memory_id, note_id, relationship="has_note")
 
-            # Audit log
-            # self.audit_log.append({
-            #     'action': 'add_note',
-            #     'note_id': note_id,
-            #     'memory_id': memory_id,
-            #     'timestamp': self._current_timestamp()
-            # })
             self.notifier.log(f"Note added: ID={note_id} to Memory ID={memory_id}")
 
             return note_id
 
     @tool
-    def get_notes_for_memory(self, memory_id: str) -> Dict[str, Any]:
+    def get_notes_for_memory(self, memory_id: str) -> dict:
         """
         Retrieve all notes connected to a memory.
 
@@ -832,7 +710,7 @@ class MemoryGraph(Toolkit):
             memory_id (str): The ID of the memory.
 
         Returns:
-            dict: A dictionary of note IDs and their data.
+            notes (dict): A dictionary of note IDs and their data.
 
         Raises:
             MemoryNotFoundError: If the memory ID does not exist.
@@ -848,14 +726,46 @@ class MemoryGraph(Toolkit):
             else:
                 raise MemoryNotFoundError(f"Memory with ID '{memory_id}' not found.")
 
-    # Relationship Methods #
+    # # Relationship Methods #
+    @tool
+    def add_lazy_relationship(self, from_node: dict, to_node: dict, relationship_type: str, **metadata):
+        """
+        Creates two new nodes and adds a relationship between them
+
+        Parameters:
+          from_node (dict): dictionary with keys title, summary, tags (list)
+          to_node (dict): dictionary with keys tite, summary, tags (list)
+          relationship_type (str): Specific relationship relating two nodes
+          metadata (any): Additional {key: value} data to add to the relationship
+        """
+        from_node_id = self.add_memory(
+            from_node["title"],
+            from_node["summary"],
+            from_node["tags"]
+        )
+
+        to_node_id = self.add_memory(
+            to_node["title"],
+            to_node["summary"],
+            to_node["tags"]
+        )
+
+        self.graph.add_edge(
+                from_node_id,
+                to_node_id,
+                relationship=relationship_type,
+                **metadata
+            )
+        
+        return f"created two nodes {from_node_id} and {to_node_id} with a {relationship_type.upper()} edge"
+
     @tool
     def add_relationship(
         self,
         from_memory_id: str,
         to_memory_id: str,
-        relationship_type: RelationshipType,
-        **metadata: Any
+        relationship_type: str,
+        **metadata: any
     ) -> None:
         """
         Add a relationship between two memories.
@@ -863,37 +773,28 @@ class MemoryGraph(Toolkit):
         Parameters:
             from_memory_id (str): The ID of the source memory.
             to_memory_id (str): The ID of the target memory.
-            relationship_type (RelationshipType): The type of relationship (e.g., 'relates_to').
-            metadata: Additional metadata for the relationship.
+            relationship_type (str): The type of relationship.
+            metadata (any): Additional metadata for the relationship.
 
         Raises:
             MemoryNotFoundError: If either memory ID does not exist.
             ValueError: If attempting to create a relationship with invalid parameters.
         """
-        # logger.debug(f"Adding relationship '{relationship_type}' from '{from_memory_id}' to '{to_memory_id}'")
         with self.lock:
             if from_memory_id not in self.graph:
-                # logger.error(f"Source memory ID '{from_memory_id}' not found.")
                 raise MemoryNotFoundError(f"Memory with ID '{from_memory_id}' not found.")
             if to_memory_id not in self.graph:
-                # logger.error(f"Target memory ID '{to_memory_id}' not found.")
                 raise MemoryNotFoundError(f"Memory with ID '{to_memory_id}' not found.")
             if from_memory_id == to_memory_id:
-                # logger.error("Cannot create a relationship from a memory to itself.")
                 raise ValueError("Cannot create a relationship from a memory to itself.")
-            # Create the relationship instance
-            relationship = Relationship(relationship_type=relationship_type, metadata=metadata)
+            
             # Add an edge with relationship data
-            self.graph.add_edge(from_memory_id, to_memory_id, **relationship.to_dict())
-            # Audit log
-            # self.audit_log.append({
-            #     'action': 'add_relationship',
-            #     'from_memory_id': from_memory_id,
-            #     'to_memory_id': to_memory_id,
-            #     'relationship_type': relationship_type.value,
-            #     'metadata': metadata,
-            #     'timestamp': self._current_timestamp()
-            # })
+            self.graph.add_edge(
+                from_memory_id,
+                to_memory_id,
+                relationship=relationship_type,
+            )
+           
             self.notifier.log(f"Relationship '{relationship_type}' added from '{from_memory_id}' to '{to_memory_id}'.")
     
     @tool
@@ -901,7 +802,7 @@ class MemoryGraph(Toolkit):
         self,
         from_memory_id: str,
         to_memory_id: str,
-        relationship_type: Optional[str] = None
+        relationship_type: str = ''
     ) -> None:
         """
         Remove a specific relationship between two memories.
@@ -915,42 +816,26 @@ class MemoryGraph(Toolkit):
             MemoryNotFoundError: If either memory ID does not exist.
             ValueError: If the specified relationship does not exist.
         """
-        # logger.debug(f"Removing relationship from '{from_memory_id}' to '{to_memory_id}' of type '{relationship_type}'")
         with self.lock:
             if from_memory_id not in self.graph:
-                # logger.error(f"Source memory ID '{from_memory_id}' not found.")
                 raise MemoryNotFoundError(f"Memory with ID '{from_memory_id}' not found.")
             if to_memory_id not in self.graph:
-                # logger.error(f"Target memory ID '{to_memory_id}' not found.")
                 raise MemoryNotFoundError(f"Memory with ID '{to_memory_id}' not found.")
             if not self.graph.has_edge(from_memory_id, to_memory_id):
-                # logger.error(f"No relationship exists between '{from_memory_id}' and '{to_memory_id}'.")
                 raise ValueError(f"No relationship exists between '{from_memory_id}' and '{to_memory_id}'.")
             
             # If a specific relationship type is provided, check and remove it
             if relationship_type:
                 edge_data = self.graph.get_edge_data(from_memory_id, to_memory_id)
                 if edge_data.get('relationship_type') != relationship_type:
-                    # logger.error(f"Relationship type '{relationship_type}' does not match the existing relationship.")
                     raise ValueError(f"Relationship type '{relationship_type}' does not match the existing relationship.")
                 self.graph.remove_edge(from_memory_id, to_memory_id)
-                # logger.info(f"Relationship '{relationship_type}' removed from '{from_memory_id}' to '{to_memory_id}'.")
             else:
-                # Remove all relationships between the two memories
                 self.graph.remove_edge(from_memory_id, to_memory_id)
-                # logger.info(f"All relationships removed from '{from_memory_id}' to '{to_memory_id}'.")
             
-            # Audit log
-            self.audit_log.append({
-                'action': 'remove_relationship',
-                'from_memory_id': from_memory_id,
-                'to_memory_id': to_memory_id,
-                'relationship_type': relationship_type,
-                'timestamp': self._current_timestamp()
-            })
-
+  
     @tool
-    def get_relationships(self, memory_id: str) -> List[Dict[str, Any]]:
+    def get_relationships(self, memory_id: str) -> list:
         """
         Retrieve all relationships associated with a memory.
 
@@ -958,15 +843,13 @@ class MemoryGraph(Toolkit):
             memory_id (str): The ID of the memory.
 
         Returns:
-            list: A list of relationship details.
+            relationships (list[dict]): A list of relationship details.
 
         Raises:
             MemoryNotFoundError: If the memory ID does not exist.
         """
-        # logger.debug(f"Retrieving relationships for memory ID '{memory_id}'")
         with self.lock:
             if memory_id not in self.graph:
-                # logger.error(f"Memory ID '{memory_id}' not found.")
                 raise MemoryNotFoundError(f"Memory with ID '{memory_id}' not found.")
             relationships = []
             for neighbor in self.graph.neighbors(memory_id):
@@ -977,29 +860,25 @@ class MemoryGraph(Toolkit):
                     'metadata': edge_data.get('metadata', {})
                 }
                 relationships.append(relationship)
-            # logger.debug(f"Found {len(relationships)} relationships for memory ID '{memory_id}'")
             return relationships
 
-    ### Helper Methods ###
-    @tool
-    def _sanitize_input(self, input_value: Any, max_length: Optional[int] = 255) -> str:
+    # ### Helper Methods ###
+    def _sanitize_input(self, input_value: any, max_length: int = 255) -> str:
         """
         Sanitize input strings to prevent injection attacks and enforce length constraints.
 
         Parameters:
-            input_value (Any): The input to sanitize.
+            input_value (any): The input to sanitize.
             max_length (int, optional): Maximum allowed length of the string.
 
         Returns:
-            str: The sanitized string.
+            input (str): The sanitized string.
 
         Raises:
             ValueError: If the input is invalid or exceeds maximum length.
         """
-        if isinstance(input_value, RelationshipType):
-            input_value = input_value.value
 
-        elif not isinstance(input_value, str):
+        if not isinstance(input_value, str):
             input_value = str(input_value)
         if max_length is not None and len(input_value) > max_length:
             raise ValueError(
@@ -1027,15 +906,13 @@ class MemoryGraph(Toolkit):
             tag (str): The tag to sanitize.
 
         Returns:
-            str: The sanitized tag.
+            tag (str): The sanitized tag.
 
         Raises:
             TagError: If the tag is invalid.
         """
         sanitized_tag = self._sanitize_input(tag, max_length=50).lower()
         sanitized_tag = sanitized_tag.replace(' ', '_')
-        if not sanitized_tag or sanitized_tag == '_':
-            raise TagError("Tag cannot be empty or consist only of spaces.")
         return sanitized_tag
 
     def _current_timestamp(self) -> str:
@@ -1047,70 +924,59 @@ class MemoryGraph(Toolkit):
         """
         return datetime.now(timezone.utc).isoformat()
 
-    def audit_logs(self) -> List[Dict[str, Any]]:
-        """
-        Retrieve the audit logs.
-
-        Returns:
-            list: A list of audit log entries.
-        """
-        with self.lock:
-            return list(self.audit_log)
 
     @tool
-    def save_graph(self, filename: str="memory_graph.pkl") -> None:
+    def save_graph(self, filename: str="memory_graph.pkl") -> str:
         """
         Save the graph as a pickle file.
 
         Parameters:
             filename (str): The file path to save the graph.
 
+        Returns:
+            filename (str): The filename saved
+
         Raises:
             IOError: If the file cannot be written.
         """
         try:
-            filename = self.global_graph_dir / filename
-            with open(filename, 'wb') as file:
+            save_dir = self.global_graph_dir / filename
+            with open(save_dir, 'wb') as file:
                 pickle.dump({
                     'graph': self.graph,
                     'title_index': self.title_index,
                     'tag_set': self.tag_set,
                     'tag_index': self.tag_index,
-                    'audit_log': self.audit_log,
                 }, file)
 
-            self.audit_log.append({
-                'action': 'save_graph',
-                'filename': filename,
-                'timestamp': self._current_timestamp()
-            })
             self.notifier.log(f"Graph successfully saved to {filename}.")
+            return "Graph successfully saved."
         except IOError as e:
             # logger.error(f"Failed to save graph to {filename}: {e}")
             raise IOError(f"Failed to save graph: {e}")
 
     @tool
-    def load_graph(self) -> None:
+    def load_graph(self, filename) -> str:
         """
         Load the graph
+
+        Parameters:
+            filename (str): A valid file with a .pkl extension
 
         Raises:
             IOError: If the file cannot be read.
         """
         try:
-            filename = self.global_graph_dir / "memory_graph.pkl"
+            filename = self.global_graph_dir / filename
             with open(filename, 'rb') as file:
                 data = pickle.load(file)
                 self.graph = data['graph']
                 self.title_index = data['title_index']
                 self.tag_set = data['tag_set']
                 self.tag_index = data['tag_index']
-                self.audit_log = data['audit_log']
-            self.audit_log.append({
-                'action': 'load_graph',
-                'filename': filename,
-                'timestamp': self._current_timestamp()
-            })
+
+                return "Graph loaded succesfully. You may now search the graph"
+            
             # logger.info(f"Graph successfully loaded from {filename}.")
         except (IOError, pickle.UnpicklingError) as e:
             # logger.error(f"Failed to load graph from {filename}: {e}")
@@ -1122,6 +988,3 @@ class MemoryGraph(Toolkit):
         Learn from past experiences, and solve new problems faster.
         When encountering a new problem, search for related tags or memories to help create a plan. 
         """
-
-# IDEA: should we save individual runs as a memory graph,
-#  and then once completed we save the memory graph and connect it to the long term memory?
