@@ -3,10 +3,9 @@ import pickle
 import re
 import uuid
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import Union
 
 import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
@@ -31,7 +30,8 @@ class GraphBuilder(Toolkit):
         self.graph = Graph()
         self.local_graph_dir = Path(".goose/graph")
         self.global_graph_dir = Path.home() / ".config/goose/graph"
-        self.title_index = defaultdict(list) # maps titles to nodes
+        self.title_index = {} # Maps titles to a single node ID
+
         self.tag_set = set()  # Centralized set of tags
         self.tag_index = defaultdict(set)  # Maps tags to node IDs
         self.lock = RLock() 
@@ -49,6 +49,9 @@ class GraphBuilder(Toolkit):
             if create_backup:
                 self.save_graph()
             self.graph = Graph()
+            self.title_index = {}
+            self.tag_set = set()
+            self.tag_index = defaultdict(set) 
 
     @tool
     def add_node(
@@ -73,6 +76,7 @@ class GraphBuilder(Toolkit):
         Raises:
             ValueError: If title or summary is invalid.
         """
+        self.notifier.status(f'Creating a new node')
         with self.lock:
             # Validate and sanitize inputs
             title = self._sanitize_input(title, max_length=255)
@@ -81,21 +85,20 @@ class GraphBuilder(Toolkit):
 
             # Validate tags
             node_tags = set()
-            if tags:
-                for tag in tags:
-                    sanitized_tag = self._sanitize_tag(tag)
-                    if sanitized_tag not in self.tag_set:
-                        self.add_tag(sanitized_tag)
-                    node_tags.add(sanitized_tag)
+            for tag in tags:
+                sanitized_tag = self._sanitize_tag(tag)
+                if sanitized_tag not in self.tag_set:
+                    self.add_tag(sanitized_tag)
+                node_tags.add(sanitized_tag)
 
-            if title in self.title_index and self.title_index[title]:
-                raise ValueError(f"A node with the title '{title}' already exists.")
-
+            if title in self.title_index:
+                raise ValueError(f"DUPLICATE_TITLE_ERR: {self.title_index[title]} has the title '{title}'")
+            
             node_id = str(uuid.uuid4())[:8]
             self.graph.add_node(node_id, title=title, summary=summary, tags=list(node_tags), **sanitized_metadata)
 
             # Update indexes
-            self.title_index[title].append(node_id)
+            self.title_index[title] = node_id
             for tag in node_tags:
                 self.tag_index[tag].add(node_id)
 
@@ -113,7 +116,7 @@ class GraphBuilder(Toolkit):
         **metadata: any
     ) -> None:
         """
-        Add an edge relating two nodes
+        Add an edge relating two nodes using a specific and meaningful relationship
 
         Parameters:
             from_node_id (str): The ID of the source node.
@@ -125,6 +128,7 @@ class GraphBuilder(Toolkit):
             NodeNotFoundError: If either node ID does not exist.
             ValueError: If attempting to create a relationship with invalid parameters.
         """
+        self.notifier.status(f'adding relationship')
         with self.lock:
             if from_node_id not in self.graph:
                 raise NodeNotFoundError(f"Node with ID '{from_node_id}' not found.")
@@ -157,6 +161,7 @@ class GraphBuilder(Toolkit):
         Raises:
             NodeNotFoundError: If the node ID does not exist.
         """
+        self.notifier.status('Getting relationships')
         with self.lock:
             if node_id not in self.graph:
                 raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
@@ -170,7 +175,429 @@ class GraphBuilder(Toolkit):
                 }
                 relationships.append(relationship)
             return relationships
+  
+    @tool
+    def build_structured_relationships(self, nodes: list[dict], relationships: list[dict]) -> dict[str, str]:
+        """
+        Adds nodes with associated relationships to the Graph.
+
+        Args:
+            nodes (list[dict]): A list of nodes
+                - title (str): Title of the node.
+                - summary (str): Summary of the node.
+                - tags (list[str]): Tags associated with the node.
+
+            relationships (list[dict]): A list of relationships with keys
+                - from_node_title (str): Title of the source node.
+                - to_node_title (str): Title of the target node.
+                - relationship_type (str): Type of the relationship.
+
+        Returns:
+            node_id_map (dict[str, str]): A mapping of node titles to their unique IDs.
+
+        """
+        self.notifier.status(f'building structured relationships')
+
+        required_relationship_args = ['from_node_title', 'to_node_title', 'relationship_type']
+        for relationship in relationships:
+            if not self._validate_dict_keys(relationship, required_relationship_args):
+                raise ValueError(f"Relationships require keys: {required_relationship_args}")
+        required_node_args = ["title", "summary", "tags"]
+        for node in nodes:
+            if not self._validate_dict_keys(node, required_node_args):
+                raise ValueError(f"Nodes require keys: {required_node_args}")
+            
+            
+        node_id_map = {}  # Maps node titles to their unique IDs
+
+        # Check for duplicates across the entire graph
+        for node in nodes:
+            if node['title'] in self.title_index and self.title_index[node['title']]:
+                raise ValueError(f"Node title '{node['title']}' already exists in the graph.")
+
+        with self.lock:
+            for node in nodes:
+                # Add the node
+                node_id = self.add_node(
+                    title=node['title'],
+                    summary=node['summary'],
+                    tags=node['tags'], 
+                )
+                node_id_map[node['title']] = node_id
+
+            for relationship in relationships:
+                from_title = relationship['from_node_title']
+                to_title = relationship['to_node_title']
+                rel_type = relationship['relationship_type']
+
+                # Retrieve node IDs from titles
+                from_id = node_id_map.get(from_title)
+                to_id = node_id_map.get(to_title)
+
+                if not from_id:
+                    raise ValueError(f"Node with title '{from_title}' not found in provided nodes.")
+                if not to_id:
+                    raise ValueError(f"Node with title '{to_title}' not found in provided nodes.")
+
+                self.add_relationship(
+                    from_node_id=from_id,
+                    to_node_id=to_id,
+                    relationship_type=rel_type,
+                )
+
+        return node_id_map
+    
+    def add_tag(self, tag: str) -> None:
+        """
+        Add a new tag to the tag set.
+
+        Parameters:
+            tag (str): The tag to be added.
+
+        """
+        self.notifier.status(f'adding tag')
+        sanitized_tag = self._sanitize_tag(tag)
+        with self.lock:
+            self.tag_set.add(sanitized_tag)
         
+        return f"Added tag: {tag}"
+
+
+    ### Node Management Methods ###
+    @tool
+    def update_node(
+        self,
+        node_id: str,
+        title: str = '',
+        summary: str = '',
+        tags: list[str] = [],
+        **metadata: any
+    ) -> None:
+        """
+        Update an existing node's details and tags.
+
+        Parameters:
+            node_id (str): The ID of the node to update.
+            title (str, optional): New title.
+            summary (str, optional): New summary.
+            tags (list, optional): New list of tags.
+            metadata (any): Additional metadata to update.
+
+        Raises:
+            NodeNotFoundError: If the node ID does not exist.
+        """
+        self.notifier.status(f'updating node')
+        with self.lock:
+            if node_id not in self.graph:
+                raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
+
+            node = self.graph.nodes[node_id]
+
+            # Update title
+            if title:
+                sanitized_title = self._sanitize_input(title, max_length=255)
+                old_title = node['title']
+                node['title'] = sanitized_title
+                # Update title index
+                self.title_index[old_title].remove(node_id)
+                if not self.title_index[old_title]:
+                    del self.title_index[old_title]
+                self.title_index[sanitized_title].append(node_id)
+                self.notifier.log(f"Node ID={node_id} title updated from '{old_title}' to '{sanitized_title}'")
+
+            # Update summary
+            if summary:
+                node['summary'] = self._sanitize_input(summary, max_length=1024)
+                self.notifier.log(f"Node ID={node_id} summary updated.")
+
+            # Update metadata
+            reserved_keys = {'title', 'summary', 'tags'}
+            for key, value in metadata.items():
+                if key in reserved_keys:
+                    raise ValueError(f"Cannot overwrite reserved key '{key}' in metadata.")
+                node[key] = self._sanitize_input(value)
+
+            # Update tags
+            if tags is not None:
+                # Remove old tags from index
+                old_tags = set(node.get('tags', []))
+                for tag in old_tags:
+                    self.tag_index[tag].discard(node_id)
+                    if not self.tag_index[tag]:
+                        del self.tag_index[tag]
+
+                # Validate and sanitize new tags
+                new_tags = set()
+                for tag in tags:
+                    sanitized_tag = self._sanitize_tag(tag)
+                    if sanitized_tag not in self.tag_set:
+                        self.add_tag(sanitized_tag)
+                    new_tags.add(sanitized_tag)
+
+                # Update node tags
+                node['tags'] = list(new_tags)
+
+                # Update tag index
+                for tag in new_tags:
+                    self.tag_index[tag].add(node_id)
+
+                self.notifier.log(f"Node ID={node_id} tags updated to {list(new_tags)}")
+
+    @tool
+    def get_node(self, node_id: str) -> dict[str, str]:
+        """
+        Retrieve a node and its metadata by ID.
+
+        Parameters:
+            node_id (str): The ID of the node to retrieve.
+
+        Returns:
+           node_data (dict[str, str]): The node's data.
+
+        Raises:
+            NodeNotFoundError: If the node ID does not exist.
+        """
+        self.notifier.status(f'using get_node()')
+        with self.lock:
+            if node_id in self.graph:
+                return self.graph.nodes[node_id]
+            else:
+                raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
+
+    @tool
+    def get_node_by_title(self, title: str) -> list:
+        """
+        Search and retrieve nodes by title.
+
+        Parameters:
+            title (str): The title to search for.
+
+        Returns:
+            nodes (list): A list of tuples containing node IDs and their data.
+        """
+        self.notifier.status(f'getting nodes by title {title}')
+        with self.lock:
+            sanitized_title = self._sanitize_input(title, max_length=255)
+            node_ids = self.title_index.get(sanitized_title, [])
+            return [(node_id, self.graph.nodes[node_id]) for node_id in node_ids] if node_ids else []
+
+    @tool
+    def search_nodes_by_title(self, search_term: str) -> list:
+        """
+        Search and retrieve nodes by partial title match.
+
+        Parameters:
+            search_term (str): The substring to search for in titles.
+
+        Returns:
+            nodes (list): A list of tuples containing node IDs and their data.
+        """
+        self.notifier.status(f'searching by {search_term}')
+        with self.lock:
+            pattern = re.compile(re.escape(search_term), re.IGNORECASE)
+            matching_titles = filter(pattern.search, self.title_index.keys())
+            result = []
+            for title in matching_titles:
+                for node_id in self.title_index[title]:
+                    result.append((node_id, self.graph.nodes[node_id]))
+            return result
+
+    @tool
+    def get_neighbors(
+        self,
+        node_id: str,
+        depth: int = 3,
+        title_only: bool = False,
+    ) -> dict:
+        """
+        View neighbors connected to a specific node, up to a certain depth
+
+        Parameters:
+            node_id (str): The ID of the starting node.
+            depth (int): The depth of traversal. Defaults to 3.
+            title_only (bool): If True, return only titles. Defaults to False.
+        Returns:
+            nodes (dict): A dictionary of connected nodes up to the specified depth.
+        """
+        self.notifier.log('get_neighbors()')
+        if not isinstance(depth, int) or depth < 1:
+            raise ValueError("Depth must be a positive integer.")
+
+        with self.lock:
+            if node_id not in self.graph:
+                raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
+
+            visited = set()
+            result = {}
+            queue = deque([(node_id, 0)])
+            visited.add(node_id)
+
+            while queue:
+                current_node, current_depth = queue.popleft()
+                if current_depth > 0 and current_depth <= depth:
+                    if title_only:
+                        result[current_node] = self.graph.nodes[current_node].get('title', '')
+                    else:
+                        result[current_node] = self.graph.nodes[current_node]
+
+                if current_depth < depth:
+                    for neighbor in self.graph.neighbors(current_node):
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            queue.append((neighbor, current_depth + 1))
+
+            return result
+
+    ### Tag-Based Search Methods ###
+    @tool
+    def search_nodes_by_tags(
+        self,
+        tags: list[str],
+        match_all: bool = False
+    ) -> list[tuple[str, dict[str, str]]]:
+        """
+        Search and retrieve nodes by tags.
+
+        Parameters:
+            tags (list): List of tags to search for.
+            match_all (bool): If True, only return nodes that have all the specified tags.
+                              If False, return nodes that have any of the specified tags.
+
+        Returns:
+            nodes (list[tuple[str, dict]]): A list of tuples containing node IDs and their data.
+        """
+        with self.lock:
+            sanitized_tags = [self._sanitize_tag(tag) for tag in tags]
+            for tag in sanitized_tags:
+                if tag not in self.tag_set:
+                    return f"Tag '{tag}' does not exist. Use List tags"
+
+            if not sanitized_tags:
+                return []
+
+            # Retrieve sets of node IDs for each tag
+            node_sets = [self.tag_index[tag] for tag in sanitized_tags]
+
+            # Compute intersection or union based on match_all
+            if match_all:
+                matched_nodes = set.intersection(*node_sets) if node_sets else set()
+            else:
+                matched_nodes = set.union(*node_sets) if node_sets else set()
+
+            return [(node_id, self.graph.nodes[node_id]) for node_id in matched_nodes]
+
+    # # Relationship Methods #
+    @tool
+    def add_lazy_relationship(self, from_node: dict, to_node: dict, relationship_type: str, **metadata):
+        """
+        Adds a from_node and to_node to the graph with the specified relationship
+
+        Parameters:
+          from_node (dict): dictionary with keys title, summary, tags (list)
+          to_node (dict): dictionary with keys tite, summary, tags (list)
+          relationship_type (str): Specific relationship relating two nodes
+          metadata (any): Additional {key: value} data to add to the relationship
+        """
+        from_node_id = self.add_node(from_node["title"], from_node["summary"], from_node["tags"])
+        to_node_id = self.add_node(to_node["title"], to_node["summary"], to_node["tags"])
+        print("LAZY RELATIONSHIP")
+        self.add_relationship(from_node_id, to_node_id, relationship_type, **metadata)      
+
+        return f"Created {from_node_id} ({from_node["title"]}) "\
+        f"and {to_node_id} ({to_node['title']}) "\
+        f"with a {relationship_type.upper()} edge"
+
+    @tool
+    def remove_relationship(
+        self,
+        from_node_id: str,
+        to_node_id: str,
+        relationship_type: str = ''
+    ) -> None:
+        """
+        Remove a specific relationship between two nodes.
+
+        Parameters:
+            from_node_id (str): The ID of the source node.
+            to_node_id (str): The ID of the target node.
+            relationship_type (str, optional): The type of relationship to remove. If None, removes all relationships between the two nodes.
+
+        Raises:
+            NodeNotFoundError: If either node ID does not exist.
+            ValueError: If the specified relationship does not exist.
+        """
+        with self.lock:
+            if from_node_id not in self.graph:
+                raise NodeNotFoundError(f"Node with ID '{from_node_id}' not found.")
+            if to_node_id not in self.graph:
+                raise NodeNotFoundError(f"Node with ID '{to_node_id}' not found.")
+            if not self.graph.has_edge(from_node_id, to_node_id):
+                raise ValueError(f"No relationship exists between '{from_node_id}' and '{to_node_id}'.")
+            
+            # If a specific relationship type is provided, check and remove it
+            if relationship_type:
+                edge_data = self.graph.get_edge_data(from_node_id, to_node_id)
+                if edge_data.get('relationship_type') != relationship_type:
+                    raise ValueError(f"Relationship type '{relationship_type}' does not match the existing relationship.")
+                self.graph.remove_edge(from_node_id, to_node_id)
+            else:
+                self.graph.remove_edge(from_node_id, to_node_id)
+
+
+    @tool
+    def save_graph(self, filename: str="node_graph.pkl") -> str:
+        """
+        Saves the graph as a .pkl file to a global graph directory
+
+        Parameters:
+            filename (str): The name of the output file
+
+        Returns:
+            message (str): Success message
+
+        Raises:
+            IOError: If the file cannot be written.
+        """
+        try:
+            save_dir = self.global_graph_dir / filename
+            with open(save_dir, 'wb') as file:
+                pickle.dump({
+                    'graph': self.graph,
+                    'title_index': self.title_index,
+                    'tag_set': self.tag_set,
+                    'tag_index': self.tag_index,
+                }, file)
+
+            self.notifier.log(f"Graph successfully saved to {filename}.")
+            return "Graph successfully saved."
+        except IOError as e:
+            raise IOError(f"Failed to save graph: {e}")
+
+    @tool
+    def load_graph(self, filename) -> str:
+        """
+        Load the graph from a global graph directory
+
+        Parameters:
+            filename (str): A valid file with a .pkl extension
+
+        Raises:
+            IOError: If the file cannot be read.
+        """
+        try:
+            filename = self.global_graph_dir / filename
+            with open(filename, 'rb') as file:
+                data = pickle.load(file)
+                self.graph = data['graph']
+                self.title_index = data['title_index']
+                self.tag_set = data['tag_set']
+                self.tag_index = data['tag_index']
+
+                return "Graph loaded succesfully"
+        except (IOError, pickle.UnpicklingError) as e:
+            raise IOError(f"Failed to load graph: {e}")
+    
+          
     @tool
     def create_graphic(
         self,
@@ -329,7 +756,6 @@ class GraphBuilder(Toolkit):
         image_dir = self.local_graph_dir / save_dir
         image_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate a unique filename if not provided
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"node_graph_{timestamp}.png"
@@ -347,7 +773,6 @@ class GraphBuilder(Toolkit):
         
         return "ERROR: Could not save graph"
 
-
     @tool
     def print_graph(self) -> str:
         """
@@ -362,7 +787,6 @@ class GraphBuilder(Toolkit):
         with self.lock:
             print(text_representation)
             for node_id, data in self.graph.nodes(data=True):
-                # node_title = TODO: show node_id: title
                 text_representation += f"{node_id}: {data['title']}"
                 print(f"{node_id}: {data}")
             print("\n--- Graph Edges ---")
@@ -372,384 +796,13 @@ class GraphBuilder(Toolkit):
         
         return text_representation
 
-    @tool
-    def build_structured_relationships(self, nodes: list[dict], relationships: list[dict]) -> dict[str, str]:
-        """
-        Creates multiple nodes and associated relationships and adds them to the Graph.
+    def _ensure_graph_dirs(self) -> None:
+        """Ensure node directories exist"""
+        self.local_graph_dir.parent.mkdir(parents=True, exist_ok=True)
+        self.local_graph_dir.mkdir(exist_ok=True)
+        self.global_graph_dir.parent.mkdir(parents=True, exist_ok=True)
+        self.global_graph_dir.mkdir(exist_ok=True)
 
-        Args:
-            nodes (list[dict]): A list of nodes with keys: title (str), summary (str), and list of tags (str),
-                - title (str): Title of the node.
-                - summary (str): Summary of the node.
-                - tags (list[str]): Tags associated with the node.
-
-            relationships (list[dict]): A list of relationships with keys
-                - from_node_title (str): Title of the source node.
-                - to_node_title (str): Title of the target node.
-                - relationship_type (str): Type of the relationship.
-
-        Returns:
-            node_id_map (dict[str, str]): A mapping of node titles to their unique IDs.
-
-        """
-        required_relationship_args = ['from_node_title', 'to_node_title', 'relationship_type']
-        for relationship in relationships:
-            if not self._validate_dict_keys(relationship, required_relationship_args):
-                return f"[ERROR build_structured_relationships]: Relationships"\
-                       f"must have keys: {required_relationship_args}"
-            
-                
-        
-        required_node_args = ["title", "summary", "tags"]
-        for node in nodes:
-            if not self._validate_dict_keys(node, required_node_args):
-                return f"[ERROR]: Each node must have keys: {required_node_args}"
-            
-            
-        node_id_map = {}  # Maps node titles to their unique IDs
-
-        # Check for duplicates across the entire graph
-        for node in nodes:
-            if node['title'] in self.title_index and self.title_index[node['title']]:
-                raise ValueError(f"Node title '{node['title']}' already exists in the graph.")
-
-        with self.lock:
-            for node in nodes:
-                # Add the node
-                node_id = self.add_node(
-                    title=node['title'],
-                    summary=node['summary'],
-                    tags=node['tags'], 
-                )
-                node_id_map[node['title']] = node_id
-
-            for relationship in relationships:
-                from_title = relationship['from_node_title']
-                to_title = relationship['to_node_title']
-                rel_type = relationship['relationship_type']
-
-                # Retrieve node IDs from titles
-                # TODO: Search existing nodes too
-                from_id = node_id_map.get(from_title)
-                to_id = node_id_map.get(to_title)
-
-                if not from_id:
-                    raise ValueError(f"Node with title '{from_title}' not found in provided nodes.")
-                if not to_id:
-                    raise ValueError(f"Node with title '{to_title}' not found in provided nodes.")
-
-                self.add_relationship(
-                    from_node_id=from_id,
-                    to_node_id=to_id,
-                    relationship_type=rel_type,
-                )
-
-        return node_id_map
-    
-    ### Tag Management Methods ###
-    def add_tag(self, tag: str) -> None:
-        """
-        Add a new tag to the tag set.
-
-        Parameters:
-            tag (str): The tag to be added.
-
-        """
-        sanitized_tag = self._sanitize_tag(tag)
-        with self.lock:
-            self.tag_set.add(sanitized_tag)
-        
-        return f"Added tag: {tag}"
-
-    @tool
-    def list_tags(self) -> list[str]:
-        """
-        List all available tags.
-
-        Returns:
-            sorted_tags (list[str]): A list of all tags.
-        """
-        with self.lock:
-            return sorted(list(self.tag_set))
-
-    ### Node Management Methods ###
-    @tool
-    def update_node(
-        self,
-        node_id: str,
-        title: str = '',
-        summary: str = '',
-        tags: list[str] = [],
-        **metadata: any
-    ) -> None:
-        """
-        Update an existing node's details and tags.
-
-        Parameters:
-            node_id (str): The ID of the node to update.
-            title (str, optional): New title.
-            summary (str, optional): New summary.
-            tags (list, optional): New list of tags.
-            metadata (any): Additional metadata to update.
-
-        Raises:
-            NodeNotFoundError: If the node ID does not exist.
-        """
-        with self.lock:
-            if node_id not in self.graph:
-                raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
-
-            node = self.graph.nodes[node_id]
-
-            # Update title
-            if title:
-                sanitized_title = self._sanitize_input(title, max_length=255)
-                old_title = node['title']
-                node['title'] = sanitized_title
-                # Update title index
-                self.title_index[old_title].remove(node_id)
-                if not self.title_index[old_title]:
-                    del self.title_index[old_title]
-                self.title_index[sanitized_title].append(node_id)
-                self.notifier.log(f"Node ID={node_id} title updated from '{old_title}' to '{sanitized_title}'")
-
-            # Update summary
-            if summary:
-                node['summary'] = self._sanitize_input(summary, max_length=1024)
-                self.notifier.log(f"Node ID={node_id} summary updated.")
-
-            # Update metadata
-            reserved_keys = {'title', 'summary', 'tags'}
-            for key, value in metadata.items():
-                if key in reserved_keys:
-                    raise ValueError(f"Cannot overwrite reserved key '{key}' in metadata.")
-                node[key] = self._sanitize_input(value)
-
-            # Update tags
-            if tags is not None:
-                # Remove old tags from index
-                old_tags = set(node.get('tags', []))
-                for tag in old_tags:
-                    self.tag_index[tag].discard(node_id)
-                    if not self.tag_index[tag]:
-                        del self.tag_index[tag]
-
-                # Validate and sanitize new tags
-                new_tags = set()
-                for tag in tags:
-                    sanitized_tag = self._sanitize_tag(tag)
-                    if sanitized_tag not in self.tag_set:
-                        self.add_tag(sanitized_tag)
-                    new_tags.add(sanitized_tag)
-
-                # Update node tags
-                node['tags'] = list(new_tags)
-
-                # Update tag index
-                for tag in new_tags:
-                    self.tag_index[tag].add(node_id)
-
-                self.notifier.log(f"Node ID={node_id} tags updated to {list(new_tags)}")
-
-    @tool
-    def get_node(self, node_id: str) -> dict[str, str]:
-        """
-        Retrieve a node and its metadata by ID.
-
-        Parameters:
-            node_id (str): The ID of the node to retrieve.
-
-        Returns:
-           node_data (dict[str, str]): The node's data.
-
-        Raises:
-            NodeNotFoundError: If the node ID does not exist.
-        """
-        with self.lock:
-            if node_id in self.graph:
-                return self.graph.nodes[node_id]
-            else:
-                raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
-
-    @tool
-    def get_node_by_title(self, title: str) -> list:
-        """
-        Search and retrieve nodes by title.
-
-        Parameters:
-            title (str): The title to search for.
-
-        Returns:
-            nodes (list): A list of tuples containing node IDs and their data.
-        """
-        with self.lock:
-            sanitized_title = self._sanitize_input(title, max_length=255)
-            node_ids = self.title_index.get(sanitized_title, [])
-            return [(node_id, self.graph.nodes[node_id]) for node_id in node_ids] if node_ids else []
-
-    @tool
-    def search_nodes_by_title(self, search_term: str) -> list:
-        """
-        Search and retrieve nodes by partial title match.
-
-        Parameters:
-            search_term (str): The substring to search for in titles.
-
-        Returns:
-            nodes (list): A list of tuples containing node IDs and their data.
-        """
-        with self.lock:
-            pattern = re.compile(re.escape(search_term), re.IGNORECASE)
-            matching_titles = filter(pattern.search, self.title_index.keys())
-            result = []
-            for title in matching_titles:
-                for node_id in self.title_index[title]:
-                    result.append((node_id, self.graph.nodes[node_id]))
-            return result
-
-    @tool
-    def get_neighbors(
-        self,
-        node_id: str,
-        depth: int = 3,
-        title_only: bool = False,
-    ) -> dict:
-        """
-        View neighbors connected to a specific node, up to a certain depth
-
-        Parameters:
-            node_id (str): The ID of the starting node.
-            depth (int): The depth of traversal. Defaults to 3.
-            title_only (bool): If True, return only titles. Defaults to False.
-        Returns:
-            nodes (dict): A dictionary of connected nodes up to the specified depth.
-        """
-        if not isinstance(depth, int) or depth < 1:
-            raise ValueError("Depth must be a positive integer.")
-
-        with self.lock:
-            if node_id not in self.graph:
-                raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
-
-            visited = set()
-            result = {}
-            queue = deque([(node_id, 0)])
-            visited.add(node_id)
-
-            while queue:
-                current_node, current_depth = queue.popleft()
-                if current_depth > 0 and current_depth <= depth:
-                    if title_only:
-                        result[current_node] = self.graph.nodes[current_node].get('title', '')
-                    else:
-                        result[current_node] = self.graph.nodes[current_node]
-
-                if current_depth < depth:
-                    for neighbor in self.graph.neighbors(current_node):
-                        if neighbor not in visited:
-                            visited.add(neighbor)
-                            queue.append((neighbor, current_depth + 1))
-
-            return result
-
-    ### Tag-Based Search Methods ###
-    @tool
-    def search_nodes_by_tags(
-        self,
-        tags: list[str],
-        match_all: bool = False
-    ) -> list[tuple[str, dict[str, str]]]:
-        """
-        Search and retrieve nodes by tags.
-
-        Parameters:
-            tags (list): List of tags to search for.
-            match_all (bool): If True, only return nodes that have all the specified tags.
-                              If False, return nodes that have any of the specified tags.
-
-        Returns:
-            nodes (list[tuple[str, dict]]): A list of tuples containing node IDs and their data.
-        """
-        with self.lock:
-            sanitized_tags = [self._sanitize_tag(tag) for tag in tags]
-            for tag in sanitized_tags:
-                if tag not in self.tag_set:
-                    return f"Tag '{tag}' does not exist. Use List tags"
-
-            if not sanitized_tags:
-                return []
-
-            # Retrieve sets of node IDs for each tag
-            node_sets = [self.tag_index[tag] for tag in sanitized_tags]
-
-            # Compute intersection or union based on match_all
-            if match_all:
-                matched_nodes = set.intersection(*node_sets) if node_sets else set()
-            else:
-                matched_nodes = set.union(*node_sets) if node_sets else set()
-
-            return [(node_id, self.graph.nodes[node_id]) for node_id in matched_nodes]
-
-    # # Relationship Methods #
-    @tool
-    def add_lazy_relationship(self, from_node: dict, to_node: dict, relationship_type: str, **metadata):
-        """
-        Adds a from_node and to_node to the graph with the specified relationship
-
-        Parameters:
-          from_node (dict): dictionary with keys title, summary, tags (list)
-          to_node (dict): dictionary with keys tite, summary, tags (list)
-          relationship_type (str): Specific relationship relating two nodes
-          metadata (any): Additional {key: value} data to add to the relationship
-        """
-        from_node_id = self.add_node(from_node["title"], from_node["summary"], from_node["tags"])
-        to_node_id = self.add_node(to_node["title"], to_node["summary"], to_node["tags"])
-        self.add_relationship(from_node_id, to_node_id, relationship_type, **metadata)      
-
-        return f"Created {from_node_id} ({from_node["title"]}) "\
-        f"and {to_node_id} ({to_node['title']}) "\
-        f"with a {relationship_type.upper()} edge"
-
-    @tool
-    def remove_relationship(
-        self,
-        from_node_id: str,
-        to_node_id: str,
-        relationship_type: str = ''
-    ) -> None:
-        """
-        Remove a specific relationship between two nodes.
-
-        Parameters:
-            from_node_id (str): The ID of the source node.
-            to_node_id (str): The ID of the target node.
-            relationship_type (str, optional): The type of relationship to remove. If None, removes all relationships between the two nodes.
-
-        Raises:
-            NodeNotFoundError: If either node ID does not exist.
-            ValueError: If the specified relationship does not exist.
-        """
-        with self.lock:
-            if from_node_id not in self.graph:
-                raise NodeNotFoundError(f"Node with ID '{from_node_id}' not found.")
-            if to_node_id not in self.graph:
-                raise NodeNotFoundError(f"Node with ID '{to_node_id}' not found.")
-            if not self.graph.has_edge(from_node_id, to_node_id):
-                raise ValueError(f"No relationship exists between '{from_node_id}' and '{to_node_id}'.")
-            
-            # If a specific relationship type is provided, check and remove it
-            if relationship_type:
-                edge_data = self.graph.get_edge_data(from_node_id, to_node_id)
-                if edge_data.get('relationship_type') != relationship_type:
-                    raise ValueError(f"Relationship type '{relationship_type}' does not match the existing relationship.")
-                self.graph.remove_edge(from_node_id, to_node_id)
-            else:
-                self.graph.remove_edge(from_node_id, to_node_id)
-            
-  
-   
-
-    ### Helper Methods ###
     def _sanitize_input(self, input_value: any, max_length: int = 255) -> str:
         """
         Sanitize input strings to prevent injection attacks and enforce length constraints.
@@ -774,13 +827,6 @@ class GraphBuilder(Toolkit):
         if not sanitized:
             raise ValueError("Input cannot be empty or whitespace.")
         return sanitized
-    
-    def _ensure_graph_dirs(self) -> None:
-        """Ensure node directories exist"""
-        self.local_graph_dir.parent.mkdir(parents=True, exist_ok=True)
-        self.local_graph_dir.mkdir(exist_ok=True)
-        self.global_graph_dir.parent.mkdir(parents=True, exist_ok=True)
-        self.global_graph_dir.mkdir(exist_ok=True)
 
     def _sanitize_tag(self, tag: str) -> str:
         """Sanitize and standardize tag strings"""
@@ -792,67 +838,11 @@ class GraphBuilder(Toolkit):
         """Validate all required keys exist in a dictionary"""
         for arg in required_keys:
             if arg not in item:
-                return False
-        
+                return False    
         return True
-
-
-    @tool
-    def save_graph(self, filename: str="node_graph.pkl") -> str:
-        """
-        Saves the graph as a .pkl file to a global graph directory
-
-        Parameters:
-            filename (str): The name of the output file
-
-        Returns:
-            message (str): Success message
-
-        Raises:
-            IOError: If the file cannot be written.
-        """
-        try:
-            save_dir = self.global_graph_dir / filename
-            with open(save_dir, 'wb') as file:
-                pickle.dump({
-                    'graph': self.graph,
-                    'title_index': self.title_index,
-                    'tag_set': self.tag_set,
-                    'tag_index': self.tag_index,
-                }, file)
-
-            self.notifier.log(f"Graph successfully saved to {filename}.")
-            return "Graph successfully saved."
-        except IOError as e:
-            raise IOError(f"Failed to save graph: {e}")
-
-    @tool
-    def load_graph(self, filename) -> str:
-        """
-        Load the graph from a global graph directory
-
-        Parameters:
-            filename (str): A valid file with a .pkl extension
-
-        Raises:
-            IOError: If the file cannot be read.
-        """
-        try:
-            filename = self.global_graph_dir / filename
-            with open(filename, 'rb') as file:
-                data = pickle.load(file)
-                self.graph = data['graph']
-                self.title_index = data['title_index']
-                self.tag_set = data['tag_set']
-                self.tag_index = data['tag_index']
-
-                return "Graph loaded succesfully. You may now search the graph"
-        except (IOError, pickle.UnpicklingError) as e:
-            raise IOError(f"Failed to load graph: {e}")
     
     def system(self) -> str:
-        return f"""Use this toolkit to connect information by a known relationship type.
+        return f"""Use this toolkit to create strongly linked relationships.
         Learn from past experiences to solve previously unseen problems, faster.
         When encountering a task, search for related tags to understand what's been done in the past.
-        ALWAYS offer to open the generated file after using the create_graphic tool
         """
