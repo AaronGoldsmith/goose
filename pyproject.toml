@@ -42,7 +42,7 @@ synopsis = "goose.synopsis.toolkit:SynopsisDeveloper"
 browser = "goose.toolkit.web_browser:BrowserToolkit"
 memory = "goose.toolkit.memory:Memory"
 google_workspace = "goose.toolkit.google_workspace:GoogleWorkspace"
-graph_builder = "goose.toolkit.graph:GraphBuilder"
+network = "goose.toolkit.graph:NetworkBuilder"
 
 [project.entry-points."goose.profile"]
 default = "goose.profile:default_profile"

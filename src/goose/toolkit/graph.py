@@ -24,12 +24,12 @@ class NodeNotFoundError(Exception):
     pass
 
 
-class GraphBuilder(Toolkit):
+class NetworkBuilder(Toolkit):
     def __init__(self, notifier: Notifier, requires: Requirements) -> None:
         super().__init__(notifier=notifier, requires=requires)
         self.graph = Graph()
-        self.local_graph_dir = Path(".goose/graph")
-        self.global_graph_dir = Path.home() / ".config/goose/graph"
+        self.local_graph_dir = Path(".goose/network")
+        self.global_graph_dir = Path.home() / ".config/goose/network"
         self.title_index = {} # Maps titles to a single node ID
 
         self.tag_set = set()  # Centralized set of tags
@@ -38,16 +38,19 @@ class GraphBuilder(Toolkit):
         self._ensure_graph_dirs()
     
     @tool
-    def reset_graph(self, create_backup: bool = False) -> None:
+    def reset_network(self, create_backup: bool = False) -> None:
         """
-        Resets the graph
+        Resets the network
 
         Parameters:
            create_backup (bool): Whether to save the graph before resetting
         """
+        # TODO: can we prompt user for confirmation?
         with self.lock:
             if create_backup:
-                self.save_graph()
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"graph_backup_{timestamp}.png"
+                self.save_graph(filename)
             self.graph = Graph()
             self.title_index = {}
             self.tag_set = set()
@@ -86,11 +89,11 @@ class GraphBuilder(Toolkit):
             node_tags = set()
             for tag in tags:
                 sanitized_tag = self._sanitize_tag(tag)
-                self.add_tag(sanitized_tag)
+                self.tag_set.add(sanitized_tag)
                 node_tags.add(sanitized_tag)
 
             if title in self.title_index:
-                raise ValueError(f"DUPLICATE_TITLE_ERR: {self.title_index[title]} has the title '{title}'")
+                raise ValueError(f"Duplicate title: {self.title_index[title]} has the title '{title}'")
             
             node_id = str(uuid.uuid4())[:8]
             self.graph.add_node(node_id, title=title, summary=summary, tags=list(node_tags), **sanitized_metadata)
@@ -116,7 +119,7 @@ class GraphBuilder(Toolkit):
         **metadata: any
     ) -> None:
         """
-        Add an edge relating two nodes using a specific and meaningful relationship
+        Add an edge between two nodes
 
         Parameters:
             from_node_id (str): The ID of the source node.
@@ -128,7 +131,6 @@ class GraphBuilder(Toolkit):
             NodeNotFoundError: If either node ID does not exist.
             ValueError: If attempting to create a relationship with invalid parameters.
         """
-        self.notifier.status(f'adding relationship')
         with self.lock:
             if from_node_id not in self.graph:
                 raise NodeNotFoundError(f"Node with ID '{from_node_id}' not found.")
@@ -151,7 +153,7 @@ class GraphBuilder(Toolkit):
     @tool
     def get_relationships(self, node_id: str) -> list:
         """
-        Retrieve all relationships associated with a specific node in the graph.
+        Retrieve all relationships associated with a specific node in the network.
 
         Parameters:
             node_id (str): The ID of the node.
@@ -176,7 +178,53 @@ class GraphBuilder(Toolkit):
                 }
                 relationships.append(relationship)
             return relationships
-  
+    
+    @tool
+    def get_neighbors(
+        self,
+        node_id: str,
+        depth: int = 3,
+        title_only: bool = False,
+    ) -> dict:
+        """
+        View neighbors connected to a specific node, up to a certain depth
+
+        Parameters:
+            node_id (str): The ID of the starting node.
+            depth (int): The depth of traversal. Defaults to 3.
+            title_only (bool): If True, return only titles. Defaults to False.
+        Returns:
+            nodes (dict): A dictionary of connected nodes up to the specified depth.
+        """
+        self.notifier.log('Getting neighbors for node')
+        if not isinstance(depth, int) or depth < 1:
+            raise ValueError("Depth must be a positive integer.")
+
+        with self.lock:
+            if node_id not in self.graph:
+                raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
+
+            visited = set()
+            result = {}
+            queue = deque([(node_id, 0)])
+            visited.add(node_id)
+
+            while queue:
+                current_node, current_depth = queue.popleft()
+                if current_depth > 0 and current_depth <= depth:
+                    if title_only:
+                        result[current_node] = self.graph.nodes[current_node].get('title', '')
+                    else:
+                        result[current_node] = self.graph.nodes[current_node]
+
+                if current_depth < depth:
+                    for neighbor in self.graph.neighbors(current_node):
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            queue.append((neighbor, current_depth + 1))
+
+            return result
+
     @tool
     def add_nodes_with_relationships(self, nodes: list[dict], relationships: list[dict]) -> dict[str, str]:
         """
@@ -195,7 +243,6 @@ class GraphBuilder(Toolkit):
 
         Returns:
             node_id_map (dict[str, str]): A mapping of node titles to their unique IDs.
-
         """
 
         self.notifier.log(Rule(RULEPREFIX + f"Connecting {len(nodes)} nodes to the graph", style=RULESTYLE, align="left"))
@@ -330,7 +377,7 @@ class GraphBuilder(Toolkit):
             for tag in tags:
                 sanitized_tag = self._sanitize_tag(tag)
                 if sanitized_tag not in self.tag_set:
-                    self.add_tag(sanitized_tag)
+                    self.tag_set.add(tag)
                 new_tags.add(sanitized_tag)
 
             # Update node tags
@@ -399,52 +446,6 @@ class GraphBuilder(Toolkit):
             for title in matching_titles:
                 for node_id in self.title_index[title]:
                     result.append((node_id, self.graph.nodes[node_id]))
-            return result
-
-    @tool
-    def get_neighbors(
-        self,
-        node_id: str,
-        depth: int = 3,
-        title_only: bool = False,
-    ) -> dict:
-        """
-        View neighbors connected to a specific node, up to a certain depth
-
-        Parameters:
-            node_id (str): The ID of the starting node.
-            depth (int): The depth of traversal. Defaults to 3.
-            title_only (bool): If True, return only titles. Defaults to False.
-        Returns:
-            nodes (dict): A dictionary of connected nodes up to the specified depth.
-        """
-        self.notifier.log('get_neighbors()')
-        if not isinstance(depth, int) or depth < 1:
-            raise ValueError("Depth must be a positive integer.")
-
-        with self.lock:
-            if node_id not in self.graph:
-                raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
-
-            visited = set()
-            result = {}
-            queue = deque([(node_id, 0)])
-            visited.add(node_id)
-
-            while queue:
-                current_node, current_depth = queue.popleft()
-                if current_depth > 0 and current_depth <= depth:
-                    if title_only:
-                        result[current_node] = self.graph.nodes[current_node].get('title', '')
-                    else:
-                        result[current_node] = self.graph.nodes[current_node]
-
-                if current_depth < depth:
-                    for neighbor in self.graph.neighbors(current_node):
-                        if neighbor not in visited:
-                            visited.add(neighbor)
-                            queue.append((neighbor, current_depth + 1))
-
             return result
 
     @tool
