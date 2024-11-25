@@ -36,7 +36,20 @@ class GraphBuilder(Toolkit):
         self.tag_index = defaultdict(set)  # Maps tags to node IDs
         self.lock = RLock() 
         self._ensure_graph_dirs()
-   
+    
+    @tool
+    def reset_graph(self, create_backup: bool = False) -> None:
+        """
+        Resets the graph
+
+        Parameters:
+           create_backup (bool): Whether to save the graph before resetting
+        """
+        with self.lock:
+            if create_backup:
+                self.save_graph()
+            self.graph = Graph()
+
     @tool
     def add_node(
         self,
@@ -159,59 +172,47 @@ class GraphBuilder(Toolkit):
             return relationships
         
     @tool
-    def show_graph(
+    def create_graphic(
         self,
         node_size: int = 500,
         node_color: str = 'skyblue',
-        notes_color: str = 'lightgreen',
         tagged_node_colors: dict[str, str] = None,
         edge_color: str = 'blue',
-        edge_color_has_note: str = 'green',
         figsize: tuple[int, int] = (12, 8),
         with_labels: bool = True,
-        with_edge_labels: bool = False,
+        with_edge_labels: bool = True,
         font_size: int = 10,
         title: str = "Node Graph",
         save_dir: str = "graph_images",
-        filename: str = ''
+        filename: str = '',
     ) -> str:
         """
-        Display the graph using matplotlib with aesthetic enhancements and save it locally.
+        Save an image of the graph using matplotlib with aesthetic enhancements
     
         Parameters:
             node_size (int): Size of the nodes.
             node_color (str): Color for node nodes.
-            notes_color (str): Color for note nodes.
             tagged_node_colors (dict[str, str]): Tag names and their associated node colors.
             edge_color (str): Color for relationships.
-            edge_color_has_note (str): Color for 'has_note' relationships.
             figsize (tuple[int, int]): Size of the matplotlib figure.
             with_labels (bool): Whether to display labels on nodes.
             with_edge_labels (bool): Whether to display labels on edges
             font_size (int): Font size for labels.
             title (str): Title of the graph.
             save_dir (str): Directory to save the graph image.
-            filename (str): Specific filename for the saved image. If None, a unique filename is generated.
-    
+            filename (str): Specific filename for the saved image.
         Returns:
             Result (str): A string in the format "image:<path_to_image>".
         """
         plt.figure(figsize=figsize)
         G = self.graph.copy()
         if len(G.nodes) == 0:
-            return "The graph hasn't been created yet"
+            return "Nothing to create. No nodes have been added to the graph"
         
-        # Define node colors based on node type (node, note, or tags)
         node_colors = []
         node_shapes = []
         for node_id, data in G.nodes(data=True):
-            if 'title' in data:
-                node_colors.append(node_color)
-                node_shapes.append('o')  # Circle for nodes
-            elif 'content' in data:
-                node_colors.append(notes_color)
-                node_shapes.append('s')  # Square for notes
-            elif tagged_node_colors:
+            if tagged_node_colors:
                 matched_tag = None
                 for tag, color in tagged_node_colors.items():
                     if tag in data.get('tags', []):  # Check if the node has the tag
@@ -219,17 +220,21 @@ class GraphBuilder(Toolkit):
                         break
                 node_colors.append(matched_tag if matched_tag else 'grey')  # Default to grey if no tag matched
                 node_shapes.append('^')  # Triangle for tagged nodes
+            if 'title' in data:
+                node_colors.append(node_color)
+                node_shapes.append('o')  # Circle for nodes
             else:
                 node_colors.append('grey')  # Default color
                 node_shapes.append('^')  # Triangle for undefined types
     
         # Define edge colors based on relationship type
         edge_colors = []
+        edge_relationship_types = set()
         edge_relationship_types = set() 
 
         for u, v, data in G.edges(data=True):
             rel_type = data.get('relationship_type', 'relates_to')
-            edge_colors.append(edge_color if rel_type != 'has_note' else edge_color_has_note)
+            edge_colors.append(edge_color)
             edge_relationship_types.add(rel_type)
 
         # Choose a layout for the graph
@@ -266,10 +271,7 @@ class GraphBuilder(Toolkit):
         legend_handles = []
         if not with_edge_labels:
             for rel_type in edge_relationship_types:
-                if rel_type == 'has_note':
-                    legend_handles.append(mlines.Line2D([], [], color=edge_color_has_note, label='Has Note', linewidth=2))
-                else:
-                    legend_handles.append(mlines.Line2D([], [], color=edge_color, label=rel_type, linewidth=2))
+                legend_handles.append(mlines.Line2D([], [], color=edge_colors[0], label=rel_type, linewidth=2))
 
         if with_edge_labels:
             # Draw edge labels
@@ -292,8 +294,6 @@ class GraphBuilder(Toolkit):
             for node_id, data in G.nodes(data=True):
                 if 'title' in data:
                     node_labels[node_id] = data['title']
-                elif 'content' in data:
-                    node_labels[node_id] = f"Note: {data['content'][:20]}..."  # Truncate long notes
                 else:
                     node_labels[node_id] = node_id  # Fallback to node ID
             
@@ -307,8 +307,7 @@ class GraphBuilder(Toolkit):
 
         # Define legend elements
         node_patch = mpatches.Patch(color=node_color, label='Node')
-        note_patch = mpatches.Patch(color=notes_color, label='Note')
-        legend_handles = [node_patch, note_patch]
+        legend_handles.append(node_patch)
         
         if tagged_node_colors:
             for tag, color in tagged_node_colors.items():
@@ -342,7 +341,7 @@ class GraphBuilder(Toolkit):
 
         plt.savefig(save_path, format='png', dpi=300, bbox_inches='tight')
         plt.close()
-
+            
         if os.path.exists(save_path):
             return f"image:{save_path}"
         
@@ -364,7 +363,7 @@ class GraphBuilder(Toolkit):
             print(text_representation)
             for node_id, data in self.graph.nodes(data=True):
                 # node_title = TODO: show node_id: title
-                text_representation += f"{node_id}: {data}"
+                text_representation += f"{node_id}: {data['title']}"
                 print(f"{node_id}: {data}")
             print("\n--- Graph Edges ---")
             for u, v, data in self.graph.edges(data=True):
@@ -372,54 +371,50 @@ class GraphBuilder(Toolkit):
                 print(f"{u} --{data}--> {v}")
         
         return text_representation
-        
+
     @tool
-    def build_structured_relationships(self, nodes: list[dict[str, Union[str, dict]]], relationships: list[dict]) -> dict[str, str]:
+    def build_structured_relationships(self, nodes: list[dict], relationships: list[dict]) -> dict[str, str]:
         """
-        Creates multiple nodes and associated relationships, then adds them to the graph.
+        Creates multiple nodes and associated relationships and adds them to the Graph.
 
         Args:
-            nodes (list[dict]): A list of dictionaries with title, summary, tags, and notes
+            nodes (list[dict]): A list of nodes with keys: title (str), summary (str), and list of tags (str),
                 - title (str): Title of the node.
                 - summary (str): Summary of the node.
                 - tags (list[str]): Tags associated with the node.
-                - notes (list[dict]): Notes related to the node.
 
-            relationships (list[dict]): A list of relationships between nodes. 
-                - from_node_title (str or None): Title of the source node.
-                - to_node_title (str or None): Title of the target node.
-                - relationship_type (str or None): Type of the relationship.
+            relationships (list[dict]): A list of relationships with keys
+                - from_node_title (str): Title of the source node.
+                - to_node_title (str): Title of the target node.
+                - relationship_type (str): Type of the relationship.
 
         Returns:
             node_id_map (dict[str, str]): A mapping of node titles to their unique IDs.
 
         """
         required_relationship_args = ['from_node_title', 'to_node_title', 'relationship_type']
-        for arg in required_relationship_args:
-            if arg not in relationships:
-                return f"[ERROR]: Each relationship must have: {required_relationship_args}"
+        for relationship in relationships:
+            if not self._validate_dict_keys(relationship, required_relationship_args):
+                return f"[ERROR build_structured_relationships]: Relationships"\
+                       f"must have keys: {required_relationship_args}"
+            
+                
         
-        required_node_args = ["title", "summary", "tags", "notes"]
+        required_node_args = ["title", "summary", "tags"]
         for node in nodes:
             if not self._validate_dict_keys(node, required_node_args):
-                return f"[ERROR]: Each node must have: {required_node_args}"
+                return f"[ERROR]: Each node must have keys: {required_node_args}"
             
             
         node_id_map = {}  # Maps node titles to their unique IDs
 
         # Check for duplicates across the entire graph
-        existing_titles = set()
         for node in nodes:
             if node['title'] in self.title_index and self.title_index[node['title']]:
-                node['']
                 raise ValueError(f"Node title '{node['title']}' already exists in the graph.")
-            existing_titles.add(node['title'])
 
         with self.lock:
             for node in nodes:
-                for tag in node['tags']:
-                    if tag not in self.tag_set:
-                        self.add_tag(tag)
                 # Add the node
                 node_id = self.add_node(
                     title=node['title'],
@@ -427,14 +422,6 @@ class GraphBuilder(Toolkit):
                     tags=node['tags'], 
                 )
                 node_id_map[node['title']] = node_id
-
-                # Add associated notes, if any
-                for note in node['notes']:
-                    self.add_note(
-                        node_id=node_id,
-                        content=note['content'],  
-                        **note.get('metadata', {})
-                    )
 
             for relationship in relationships:
                 from_title = relationship['from_node_title']
@@ -703,74 +690,6 @@ class GraphBuilder(Toolkit):
 
             return [(node_id, self.graph.nodes[node_id]) for node_id in matched_nodes]
 
-    # ### Note Management Methods ###
-    # TODO: Use node toolkit instead
-    @tool
-    def add_note(
-        self,
-        node_id: str,
-        content: str,
-        max_length: int = 2048,
-        **metadata: any
-    ) -> str:
-        """
-        Add a note as a separate node connected to a node.
-
-        Parameters:
-            node_id (str): The ID of the node to attach the note to.
-            content (str): The content of the note.
-            max_length (int): Maximum allowed length of the note content.
-            metadata (any): Additional metadata for the note.
-
-        Returns:
-            note_id (str): The unique ID of the added note.
-
-        Raises:
-            NodeNotFoundError: If the node ID does not exist.
-        """
-        with self.lock:
-            if node_id not in self.graph:
-                raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
-
-            # Sanitize content and metadata
-            content = self._sanitize_input(content, max_length=max_length)
-            sanitized_metadata = {k: self._sanitize_input(v) for k, v in metadata.items()}
-
-            # Generate a unique note ID
-            note_id = str(uuid.uuid4())[:8]
-
-            self.graph.add_node(note_id, content=content, tags=["note"], **sanitized_metadata)
-            self.graph.add_edge(node_id, note_id, relationship="has_note")
-
-            self.notifier.log(f"Note added: ID={note_id} to Node ID={node_id}")
-
-            return note_id
-
-    @tool
-    def get_notes_for_node(self, node_id: str) -> dict:
-        """
-        Retrieve all notes connected to a node.
-
-        Parameters:
-            node_id (str): The ID of the node.
-
-        Returns:
-            notes (dict): A dictionary of note IDs and their data.
-
-        Raises:
-            NodeNotFoundError: If the node ID does not exist.
-        """
-        with self.lock:
-            if node_id in self.graph:
-                notes = {}
-                for neighbor in self.graph.neighbors(node_id):
-                    edge_data = self.graph.get_edge_data(node_id, neighbor)
-                    if edge_data.get('relationship') == 'has_note':
-                        notes[neighbor] = self.graph.nodes[neighbor]
-                return notes
-            else:
-                raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
-
     # # Relationship Methods #
     @tool
     def add_lazy_relationship(self, from_node: dict, to_node: dict, relationship_type: str, **metadata):
@@ -783,26 +702,13 @@ class GraphBuilder(Toolkit):
           relationship_type (str): Specific relationship relating two nodes
           metadata (any): Additional {key: value} data to add to the relationship
         """
-        from_node_id = self.add_node(
-            from_node["title"],
-            from_node["summary"],
-            from_node["tags"]
-        )
+        from_node_id = self.add_node(from_node["title"], from_node["summary"], from_node["tags"])
+        to_node_id = self.add_node(to_node["title"], to_node["summary"], to_node["tags"])
+        self.add_relationship(from_node_id, to_node_id, relationship_type, **metadata)      
 
-        to_node_id = self.add_node(
-            to_node["title"],
-            to_node["summary"],
-            to_node["tags"]
-        )
-
-        self.add_relationship(
-            from_node_id,
-            to_node_id,
-            relationship_type,
-            **metadata
-        )      
-
-        return f"Created {from_node_id} and {to_node_id} with a {relationship_type.upper()} edge"
+        return f"Created {from_node_id} ({from_node["title"]}) "\
+        f"and {to_node_id} ({to_node['title']}) "\
+        f"with a {relationship_type.upper()} edge"
 
     @tool
     def remove_relationship(
@@ -897,10 +803,10 @@ class GraphBuilder(Toolkit):
         Saves the graph as a .pkl file to a global graph directory
 
         Parameters:
-            filename (str): The file path to save the graph.
+            filename (str): The name of the output file
 
         Returns:
-            filename (str): The filename saved
+            message (str): Success message
 
         Raises:
             IOError: If the file cannot be written.
@@ -948,4 +854,5 @@ class GraphBuilder(Toolkit):
         return f"""Use this toolkit to connect information by a known relationship type.
         Learn from past experiences to solve previously unseen problems, faster.
         When encountering a task, search for related tags to understand what's been done in the past.
+        ALWAYS offer to open the generated file after using the create_graphic tool
         """
