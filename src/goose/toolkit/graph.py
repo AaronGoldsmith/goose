@@ -58,7 +58,7 @@ class GraphBuilder(Toolkit):
         self,
         title: str,
         summary: str,
-        tags: list[str],
+        tags: list[str] = [],
         **metadata: any
     ) -> str:
         """
@@ -67,7 +67,7 @@ class GraphBuilder(Toolkit):
         Parameters:
             title (str): Title of the node.
             summary (str): Summary or content of the node.
-            tags (list): List of tags to associate with the node.
+            tags (list, optional): List of tags to associate with the node.
             metadata (any): Additional metadata as key-value pairs.
 
         Returns:
@@ -76,7 +76,6 @@ class GraphBuilder(Toolkit):
         Raises:
             ValueError: If title or summary is invalid.
         """
-        self.notifier.status(f'Creating a new node')
         with self.lock:
             # Validate and sanitize inputs
             title = self._sanitize_input(title, max_length=255)
@@ -87,8 +86,7 @@ class GraphBuilder(Toolkit):
             node_tags = set()
             for tag in tags:
                 sanitized_tag = self._sanitize_tag(tag)
-                if sanitized_tag not in self.tag_set:
-                    self.add_tag(sanitized_tag)
+                self.add_tag(sanitized_tag)
                 node_tags.add(sanitized_tag)
 
             if title in self.title_index:
@@ -102,8 +100,10 @@ class GraphBuilder(Toolkit):
             for tag in node_tags:
                 self.tag_index[tag].add(node_id)
 
-            self.notifier.log(Rule(RULEPREFIX + f"Added Node: {title}", style=RULESTYLE, align="left"))
-            node_details = f"**Title:** {title}\n**Summary:** {summary}\n**Tags:** {', '.join(tags)}\n**Metadata:** {metadata}"
+
+            node_tags = f"\n[{', '.join(sorted(tags))}]" if tags else ""
+            node_metadata = f"\n**Metadata:** {metadata}" if metadata else ""
+            node_details = f"\n **{title}** {node_tags}{node_metadata}\n"
             self.notifier.log(Markdown(node_details))
             return node_id
         
@@ -137,15 +137,16 @@ class GraphBuilder(Toolkit):
             if from_node_id == to_node_id:
                 raise ValueError("Cannot create a relationship from a node to itself.")
             
-            # Add an edge with relationship data
             self.graph.add_edge(
                 from_node_id,
                 to_node_id,
                 relationship=relationship_type,
                 **metadata
             )
-           
-            self.notifier.log(f"Relationship '{relationship_type}' added from '{from_node_id}' to '{to_node_id}'.")
+            from_title = self.get_node(from_node_id)['title']
+            to_title = self.get_node(to_node_id)['title']
+
+            self.notifier.log(f"- '{relationship_type}' added from '{from_title}' to '{to_title}'.")
     
     @tool
     def get_relationships(self, node_id: str) -> list:
@@ -177,9 +178,9 @@ class GraphBuilder(Toolkit):
             return relationships
   
     @tool
-    def build_structured_relationships(self, nodes: list[dict], relationships: list[dict]) -> dict[str, str]:
+    def add_nodes_with_relationships(self, nodes: list[dict], relationships: list[dict]) -> dict[str, str]:
         """
-        Adds nodes with associated relationships to the Graph.
+        Adds nodes with associated relationships to the Graph in a single operation
 
         Args:
             nodes (list[dict]): A list of nodes
@@ -196,7 +197,8 @@ class GraphBuilder(Toolkit):
             node_id_map (dict[str, str]): A mapping of node titles to their unique IDs.
 
         """
-        self.notifier.status(f'building structured relationships')
+
+        self.notifier.log(Rule(RULEPREFIX + f"Connecting {len(nodes)} nodes to the graph", style=RULESTYLE, align="left"))
 
         required_relationship_args = ['from_node_title', 'to_node_title', 'relationship_type']
         for relationship in relationships:
@@ -255,10 +257,10 @@ class GraphBuilder(Toolkit):
             tag (str): The tag to be added.
 
         """
-        self.notifier.status(f'adding tag')
-        sanitized_tag = self._sanitize_tag(tag)
         with self.lock:
-            self.tag_set.add(sanitized_tag)
+            if tag in self.tag_set:
+                return "Tag added"
+            self.tag_set.add(tag)
         
         return f"Added tag: {tag}"
 
@@ -286,7 +288,6 @@ class GraphBuilder(Toolkit):
         Raises:
             NodeNotFoundError: If the node ID does not exist.
         """
-        self.notifier.status(f'updating node')
         with self.lock:
             if node_id not in self.graph:
                 raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
@@ -318,30 +319,28 @@ class GraphBuilder(Toolkit):
                 node[key] = self._sanitize_input(value)
 
             # Update tags
-            if tags is not None:
-                # Remove old tags from index
-                old_tags = set(node.get('tags', []))
-                for tag in old_tags:
-                    self.tag_index[tag].discard(node_id)
-                    if not self.tag_index[tag]:
-                        del self.tag_index[tag]
+            old_tags = set(node.get('tags', []))
+            for tag in old_tags:
+                self.tag_index[tag].discard(node_id)
+                if not self.tag_index[tag]:
+                    del self.tag_index[tag]
 
-                # Validate and sanitize new tags
-                new_tags = set()
-                for tag in tags:
-                    sanitized_tag = self._sanitize_tag(tag)
-                    if sanitized_tag not in self.tag_set:
-                        self.add_tag(sanitized_tag)
-                    new_tags.add(sanitized_tag)
+            # Validate and sanitize new tags
+            new_tags = set()
+            for tag in tags:
+                sanitized_tag = self._sanitize_tag(tag)
+                if sanitized_tag not in self.tag_set:
+                    self.add_tag(sanitized_tag)
+                new_tags.add(sanitized_tag)
 
-                # Update node tags
-                node['tags'] = list(new_tags)
+            # Update node tags
+            node['tags'] = list(new_tags)
 
-                # Update tag index
-                for tag in new_tags:
-                    self.tag_index[tag].add(node_id)
+            # Update tag index
+            for tag in new_tags:
+                self.tag_index[tag].add(node_id)
 
-                self.notifier.log(f"Node ID={node_id} tags updated to {list(new_tags)}")
+            self.notifier.log(f"Node ID={node_id} tags updated to {list(new_tags)}")
 
     @tool
     def get_node(self, node_id: str) -> dict[str, str]:
@@ -357,29 +356,29 @@ class GraphBuilder(Toolkit):
         Raises:
             NodeNotFoundError: If the node ID does not exist.
         """
-        self.notifier.status(f'using get_node()')
         with self.lock:
-            if node_id in self.graph:
-                return self.graph.nodes[node_id]
-            else:
+            if node_id not in self.graph:
                 raise NodeNotFoundError(f"Node with ID '{node_id}' not found.")
+            return self.graph.nodes[node_id]
+
 
     @tool
-    def get_node_by_title(self, title: str) -> list:
+    def get_node_by_title(self, title: str) -> dict:
         """
-        Search and retrieve nodes by title.
+        Search and retrieve a node by title.
 
         Parameters:
             title (str): The title to search for.
 
         Returns:
-            nodes (list): A list of tuples containing node IDs and their data.
+            node (dict): The matching node
         """
-        self.notifier.status(f'getting nodes by title {title}')
         with self.lock:
             sanitized_title = self._sanitize_input(title, max_length=255)
-            node_ids = self.title_index.get(sanitized_title, [])
-            return [(node_id, self.graph.nodes[node_id]) for node_id in node_ids] if node_ids else []
+            if sanitized_title not in self.title_index:
+                return NodeNotFoundError(f"Node {sanitized_title} does not exist")
+            node_id = self.title_index[sanitized_title]
+            return self.get_node(node_id)
 
     @tool
     def search_nodes_by_title(self, search_term: str) -> list:
@@ -448,7 +447,6 @@ class GraphBuilder(Toolkit):
 
             return result
 
-    ### Tag-Based Search Methods ###
     @tool
     def search_nodes_by_tags(
         self,
@@ -486,7 +484,6 @@ class GraphBuilder(Toolkit):
 
             return [(node_id, self.graph.nodes[node_id]) for node_id in matched_nodes]
 
-    # # Relationship Methods #
     @tool
     def add_lazy_relationship(self, from_node: dict, to_node: dict, relationship_type: str, **metadata):
         """
@@ -547,10 +544,10 @@ class GraphBuilder(Toolkit):
     @tool
     def save_graph(self, filename: str="node_graph.pkl") -> str:
         """
-        Saves the graph as a .pkl file to a global graph directory
+        Saves the graph to a global graph directory
 
         Parameters:
-            filename (str): The name of the output file
+            filename (str): The name of the output file with a .pkl extension
 
         Returns:
             message (str): Success message
@@ -569,7 +566,7 @@ class GraphBuilder(Toolkit):
                 }, file)
 
             self.notifier.log(f"Graph successfully saved to {filename}.")
-            return "Graph successfully saved."
+            return f"Graph saved to {filename}."
         except IOError as e:
             raise IOError(f"Failed to save graph: {e}")
 
@@ -665,7 +662,7 @@ class GraphBuilder(Toolkit):
             edge_relationship_types.add(rel_type)
 
         # Choose a layout for the graph
-        pos = nx.spring_layout(G, k=0.5, iterations=50, seed=42)
+        pos = nx.spring_layout(G, k=1, iterations=50, seed=42)
     
         # Draw nodes with different shapes
         unique_shapes = set(node_shapes)
@@ -696,7 +693,7 @@ class GraphBuilder(Toolkit):
 
         # Add edge relationship types to the legend if edge labels are not shown
         legend_handles = []
-        if not with_edge_labels:
+        if with_edge_labels:
             for rel_type in edge_relationship_types:
                 legend_handles.append(mlines.Line2D([], [], color=edge_colors[0], label=rel_type, linewidth=2))
 
@@ -788,7 +785,7 @@ class GraphBuilder(Toolkit):
             print(text_representation)
             for node_id, data in self.graph.nodes(data=True):
                 text_representation += f"{node_id}: {data['title']}"
-                print(f"{node_id}: {data}")
+                print(f"{node_id}: {data['title']}")
             print("\n--- Graph Edges ---")
             for u, v, data in self.graph.edges(data=True):
                 text_representation += f"{u} --{data}--> {v}"
@@ -827,7 +824,7 @@ class GraphBuilder(Toolkit):
         if not sanitized:
             raise ValueError("Input cannot be empty or whitespace.")
         return sanitized
-
+    
     def _sanitize_tag(self, tag: str) -> str:
         """Sanitize and standardize tag strings"""
         sanitized_tag = self._sanitize_input(tag, max_length=50).lower()
