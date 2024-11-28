@@ -37,25 +37,57 @@ class NetworkBuilder(Toolkit):
         self.lock = RLock() 
         self._ensure_graph_dirs()
     
-    @tool
-    def reset_network(self, create_backup: bool = False) -> None:
+    def _ensure_graph_dirs(self) -> None:
+        """Ensure node directories exist"""
+        self.local_graph_dir.parent.mkdir(parents=True, exist_ok=True)
+        self.local_graph_dir.mkdir(exist_ok=True)
+        self.global_graph_dir.parent.mkdir(parents=True, exist_ok=True)
+        self.global_graph_dir.mkdir(exist_ok=True)
+
+    def _sanitize_input(self, input_value: any, max_length: int = 255) -> str:
         """
-        Resets the network
+        Sanitize input strings to prevent injection attacks and enforce length constraints.
 
         Parameters:
-           create_backup (bool): Whether to save the graph before resetting
-        """
-        # TODO: can we prompt user for confirmation?
-        with self.lock:
-            if create_backup:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"graph_backup_{timestamp}.png"
-                self.save_graph(filename)
-            self.graph = Graph()
-            self.title_index = {}
-            self.tag_set = set()
-            self.tag_index = defaultdict(set) 
+            input_value (any): The input to sanitize.
+            max_length (int, optional): Maximum allowed length of the string.
 
+        Returns:
+            input (str): The sanitized string.
+        """
+
+        if not isinstance(input_value, str):
+            input_value = str(input_value)
+        if max_length is not None and len(input_value) > max_length:
+            raise ValueError(
+                f"Input exceeds maximum length of {max_length}."
+                 "Try splitting the content into multiple entities"
+            )
+        # Perform basic sanitization
+        sanitized = input_value.strip()
+        if not sanitized:
+            raise ValueError("Input cannot be empty or whitespace.")
+        return sanitized
+    
+    def _sanitize_tag(self, tag: str) -> str:
+        """Sanitize and standardize tag strings"""
+        sanitized_tag = self._sanitize_input(tag, max_length=50).lower()
+        sanitized_tag = sanitized_tag.replace(' ', '_')
+        return sanitized_tag
+
+    def _validate_dict_keys(self, item: dict, required_keys: list[str]):
+        """Validate all required keys exist in a dictionary"""
+        for arg in required_keys:
+            if arg not in item:
+                return False    
+        return True
+    
+    def system(self) -> str:
+        return f"""Use this toolkit to create strongly linked relationships.
+        Learn from past experiences to solve previously unseen problems, faster.
+        When encountering a task, search for related tags to understand what's been done in the past.
+        """
+    
     @tool
     def add_node(
         self,
@@ -106,10 +138,10 @@ class NetworkBuilder(Toolkit):
 
             node_tags = f"\n[{', '.join(sorted(tags))}]" if tags else ""
             node_metadata = f"\n**Metadata:** {metadata}" if metadata else ""
-            node_details = f"\n **{title}** {node_tags}{node_metadata}\n"
+            node_details = f"\n - **{title}** {node_tags}{node_metadata}\n"
             self.notifier.log(Markdown(node_details))
             return node_id
-        
+
     @tool
     def add_relationship(
         self,
@@ -595,7 +627,25 @@ class NetworkBuilder(Toolkit):
         except (IOError, pickle.UnpicklingError) as e:
             raise IOError(f"Failed to load graph: {e}")
     
-          
+    @tool
+    def reset_network(self, create_backup: bool = False) -> None:
+        """
+        Resets the network
+
+        Parameters:
+           create_backup (bool): Whether to save the graph before resetting
+        """
+        # TODO: can we prompt user for confirmation?
+        with self.lock:
+            if create_backup:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"graph_backup_{timestamp}.png"
+                self.save_graph(filename)
+            self.graph = Graph()
+            self.title_index = {}
+            self.tag_set = set()
+            self.tag_index = defaultdict(set) 
+                  
     @tool
     def create_graphic(
         self,
@@ -793,54 +843,3 @@ class NetworkBuilder(Toolkit):
                 print(f"{u} --{data}--> {v}")
         
         return text_representation
-
-    def _ensure_graph_dirs(self) -> None:
-        """Ensure node directories exist"""
-        self.local_graph_dir.parent.mkdir(parents=True, exist_ok=True)
-        self.local_graph_dir.mkdir(exist_ok=True)
-        self.global_graph_dir.parent.mkdir(parents=True, exist_ok=True)
-        self.global_graph_dir.mkdir(exist_ok=True)
-
-    def _sanitize_input(self, input_value: any, max_length: int = 255) -> str:
-        """
-        Sanitize input strings to prevent injection attacks and enforce length constraints.
-
-        Parameters:
-            input_value (any): The input to sanitize.
-            max_length (int, optional): Maximum allowed length of the string.
-
-        Returns:
-            input (str): The sanitized string.
-        """
-
-        if not isinstance(input_value, str):
-            input_value = str(input_value)
-        if max_length is not None and len(input_value) > max_length:
-            raise ValueError(
-                f"Input exceeds maximum length of {max_length}."
-                 "Try splitting the content into multiple entities"
-            )
-        # Perform basic sanitization
-        sanitized = input_value.strip()
-        if not sanitized:
-            raise ValueError("Input cannot be empty or whitespace.")
-        return sanitized
-    
-    def _sanitize_tag(self, tag: str) -> str:
-        """Sanitize and standardize tag strings"""
-        sanitized_tag = self._sanitize_input(tag, max_length=50).lower()
-        sanitized_tag = sanitized_tag.replace(' ', '_')
-        return sanitized_tag
-
-    def _validate_dict_keys(self, item: dict, required_keys: list[str]):
-        """Validate all required keys exist in a dictionary"""
-        for arg in required_keys:
-            if arg not in item:
-                return False    
-        return True
-    
-    def system(self) -> str:
-        return f"""Use this toolkit to create strongly linked relationships.
-        Learn from past experiences to solve previously unseen problems, faster.
-        When encountering a task, search for related tags to understand what's been done in the past.
-        """
